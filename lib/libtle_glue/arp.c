@@ -72,14 +72,15 @@ static inline bool
 match_addr(struct glue_ctx *ctx, struct rte_mbuf *pkt, const struct in_addr *addr)
 {
 	struct ipv4_hdr *ip4h;
-	const struct in_addr *gw;
+	struct in_addr gw;
 
 	ip4h = rte_pktmbuf_mtod_offset(pkt, struct ipv4_hdr *, pkt->l2_len);
 	if ((ip4h->version_ihl >> 4) != 4)
 		return false;
 
-	gw = ipv4_gateway_lookup(ctx, (struct in_addr *)&ip4h->dst_addr);
-	if (gw->s_addr != addr->s_addr)
+	if (ipv4_gateway_lookup(ctx, (struct in_addr *)&ip4h->dst_addr, &gw) != 0)
+		return false;
+	if (gw.s_addr != addr->s_addr)
 		return false;
 
 	return true;
@@ -558,12 +559,13 @@ void
 mac_check(struct glue_ctx *ctx, const struct sockaddr *addr)
 {
 	int rc;
-	const struct in_addr *addr4 = NULL;
+	struct in_addr addr4;
 	const struct in6_addr *addr6 = NULL;
 
 	if(addr->sa_family == AF_INET) {
-		addr4 = ipv4_gateway_lookup(ctx, addr2ipv4(addr));
-		rc = rte_hash_lookup(ctx->arp_hash, addr4);
+		if (ipv4_gateway_lookup(ctx, addr2ipv4(addr), &addr4) != 0)
+			return;
+		rc = rte_hash_lookup(ctx->arp_hash, &addr4);
 	} else {
 		addr6 = ipv6_gateway_lookup(ctx, addr2ipv6(addr));
 		rc = rte_hash_lookup(ctx->arp6_hash, addr6);
@@ -572,7 +574,7 @@ mac_check(struct glue_ctx *ctx, const struct sockaddr *addr)
 		return;
 
 	if(addr->sa_family == AF_INET)
-		arp_send_request(ctx, addr4);
+		arp_send_request(ctx, &addr4);
 	else
 		arp6_send_request(ctx, addr6);
 }
@@ -736,6 +738,7 @@ mac_fill(struct glue_ctx *ctx, struct rte_mbuf *m)
 	struct ipv6_hdr *ipv6_hdr;
 	const struct in_addr *addr4 = NULL;
 	const struct in6_addr *addr6 = NULL;
+	struct in_addr gw;
 
 	dst = rte_pktmbuf_mtod(m, struct ether_addr *);
 	if (!is_broadcast_ether_addr(dst))
@@ -748,8 +751,9 @@ mac_fill(struct glue_ctx *ctx, struct rte_mbuf *m)
 retry:
 	if (ipver == 4) {
 		addr4 = (struct in_addr *)&ipv4_hdr->dst_addr;
-		addr4 = ipv4_gateway_lookup(ctx, addr4);
-		rc = rte_hash_lookup_data(ctx->arp_hash, addr4, (void **)&idx);
+		if (ipv4_gateway_lookup(ctx, addr4, &gw) != 0)
+			return -2;
+		rc = rte_hash_lookup_data(ctx->arp_hash, &gw, (void **)&idx);
 		if (rc >= 0)
 			entry = &ctx->arp4[idx];
 	} else {
@@ -768,7 +772,7 @@ retry:
 		}
 
 		if (ipver == 4)
-			arp_send_request(ctx, addr4);
+			arp_send_request(ctx, &gw);
 		else
 			arp6_send_request(ctx, addr6);
 		entry->req_time++;
@@ -777,10 +781,10 @@ retry:
 		entry->timer = arp_timer(ctx, entry, ARP_REQUEST_EXPIRE);
 	} else {
 		if (ipver == 4) {
-			if (arp_inherit(ctx, addr4) == 0)
+			if (arp_inherit(ctx, &gw) == 0)
 				goto retry;
-			ipv4_dst_add(ctx, addr4, NULL);
-			arp_send_request(ctx, addr4);
+			ipv4_dst_add(ctx, &gw, NULL);
+			arp_send_request(ctx, &gw);
 		} else {
 			if (arp6_inherit(ctx, addr6) == 0)
 				goto retry;

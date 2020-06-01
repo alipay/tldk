@@ -55,6 +55,7 @@ SRCS-y += udp.c
 SRCS-y += select.c
 SRCS-y += gvisor_glue_sockops.c
 SRCS-y += gvisor_glue_stackops.c
+SRCS-y += route.c
 
 ifeq ($(PACKETDRILL),y)
 SRCS-y += packetdrill.c

@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -106,6 +107,8 @@ int PRE(pselect)(int nfds, fd_set *readfds, fd_set *writefds,
 /* non-posix APIs */
 int fd_ready(int fd, int events);
 void v_get_stats_snmp(unsigned long mibs[]);
+int v_route_add(in_addr_t dst, uint8_t dst_len, in_addr_t gw);
+int v_route_del(in_addr_t dst, uint8_t dst_len, in_addr_t gw);
 
 #ifdef __cplusplus
 }

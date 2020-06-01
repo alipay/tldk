@@ -175,6 +175,7 @@ int
 be_tx(struct glue_ctx *ctx)
 {
 	uint32_t n, j, k, s, ret;
+	int rc;
 	const uint16_t max_pkts = MAX_PKTS_BURST;
 	struct rte_mbuf *pkts[max_pkts];
 	struct rte_mbuf *_pkts[max_pkts];
@@ -205,9 +206,14 @@ be_tx(struct glue_ctx *ctx)
 	ret += n;
 	s = 0;
 	for (j = 0; j != n; j++) {
-		if (mac_fill(ctx, pkts[j]) == 0) {
+		rc = mac_fill(ctx, pkts[j]);
+		if (rc == 0) {
 			PKT_DUMP(pkts[j]);
 			_pkts[s++] = pkts[j];
+			continue;
+		} else if (rc == -2) {
+			/* gateway for dst address is deleted */
+			rte_pktmbuf_free(pkts[j]);
 			continue;
 		}
 
