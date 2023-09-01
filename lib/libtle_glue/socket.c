@@ -566,6 +566,9 @@ int PRE(ioctl)(int fd,  unsigned long int request, ...)
 			so->nonblock = 0;
 		rc = 0;
 		break;
+#ifndef SIOCGSTAMP
+#define SIOCGSTAMP   0x8906          /* Get stamp (timeval) */
+#endif
 	case SIOCGSTAMP:
 		if (so->s->timestamp == 0) {
 			errno = ENOENT;

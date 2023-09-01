@@ -19,11 +19,14 @@
 #include <sched.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <sys/mman.h>
+#include <linux/rtnetlink.h>
 
 #include <rte_compat.h>
 #include <rte_common.h>
 #include <rte_debug.h>
 #include <rte_eal.h>
+#include <rte_malloc.h>
 
 #include "util.h"
 #include "fd.h"
@@ -32,6 +35,61 @@
 #include "log.h"
 #include "internal.h"
 #include "tle_glue.h"
+#include "init.h"
+
+#define EXTMEM_HEAP_NAME "tldk_extmem"
+
+int external_socket_id = -1;
+long int gmtoff = 0;
+
+int create_ext_heap_socket(void)
+{
+	int ret, socket_id;
+	/* use 0xc200000000 as baseaddr for tldk heap */
+	void *addr = (void *)0xc200000000;
+
+	size_t memlen = 1024 * 1024 * 1024;
+
+	ret = rte_malloc_heap_create(EXTMEM_HEAP_NAME);
+	if (ret < 0)
+		rte_panic("create external heap failed, errno: %d", rte_errno);
+	socket_id = rte_malloc_heap_get_socket(EXTMEM_HEAP_NAME);
+	if (socket_id < 0)
+		rte_panic("get external heap socket id failed, errno: %d", rte_errno);
+
+	addr = mmap(addr, memlen, PROT_READ | PROT_WRITE,
+#ifdef SHARED_HUGE
+		    MAP_SHARED | MAP_ANONYMOUS,
+#else
+		    MAP_PRIVATE | MAP_ANONYMOUS,
+#endif
+		    -1, 0);
+	if (addr == MAP_FAILED)
+		rte_panic("Failed to alloc external heap memory, errno: %d", errno);
+#ifdef SHARED_HUGE
+	madvise(addr, memlen, MADV_HUGEPAGE);
+#endif
+	ret = rte_malloc_heap_memory_add(EXTMEM_HEAP_NAME, addr, memlen,
+					 NULL, 0, RTE_PGSIZE_2M);
+	if (ret != 0)
+		rte_panic("Failed to add memory to external heap, errno: %d",
+			  rte_errno);
+
+	GLUE_LOG(INFO, "external heap memory mapped at %p (size = 0x%zx)",
+		 addr, memlen);
+
+	return socket_id;
+}
+
+void timezone_offset_init(void)
+{
+	/* initialize offset from current timezone to GMT0 */
+	struct tm lt;
+	time_t current_ts = time(NULL);
+
+	localtime_r(&current_ts, &lt);
+	gmtoff = lt.tm_gmtoff;
+}
 
 void
 glue_init1(int argc, char **argv)

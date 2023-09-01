@@ -1,0 +1,3100 @@
+From 84ac3d059db2c2d225c22e9bd37bbf09dded97d0 Mon Sep 17 00:00:00 2001
+From: Anqi Shen <amy.saq@antgroup.com>
+Date: Thu, 19 Jul 2018 11:25:22 +0000
+Subject: [PATCH] TLDK-v2: compatible with tldk working as plugin stack
+
+This commit includes necessary modification on DPDK v18.11 to be
+compatible with TLDK-v2 working as a plugin netstack for gVisor.
+
+Signed-off-by: Anqi Shen <amy.saq@antgroup.com>
+---
+ buildtools/pmdinfogen/pmdinfogen.h            |   2 +-
+ drivers/bus/vdev/vdev.c                       |   8 +
+ drivers/mempool/ring/rte_mempool_ring.c       |  28 +++-
+ drivers/mempool/stack/rte_mempool_stack.c     | 130 +++++++++++++--
+ drivers/net/virtio/Makefile                   |   1 +
+ drivers/net/virtio/virtio_ethdev.c            |  97 ++++++++---
+ drivers/net/virtio/virtio_pci.c               |  36 +++-
+ drivers/net/virtio/virtio_pci.h               |   1 +
+ drivers/net/virtio/virtio_rxtx.c              |  62 ++++---
+ drivers/net/virtio/virtio_user/vhost_kernel.c |  88 +++++++---
+ drivers/net/virtio/virtio_user/vhost_kernel.h |  15 ++
+ .../virtio/virtio_user/vhost_kernel_sock.c    | 155 ++++++++++++++++++
+ .../net/virtio/virtio_user/vhost_kernel_tap.c |  64 +++++++-
+ .../net/virtio/virtio_user/vhost_kernel_tap.h |  39 -----
+ .../net/virtio/virtio_user/virtio_user_dev.c  |  18 +-
+ .../net/virtio/virtio_user/virtio_user_dev.h  |   4 +-
+ drivers/net/virtio/virtio_user_ethdev.c       |  33 +++-
+ lib/librte_eal/common/eal_common_memory.c     |   2 +-
+ lib/librte_eal/common/eal_common_memzone.c    |   4 +
+ lib/librte_eal/common/eal_common_options.c    |   6 +
+ lib/librte_eal/common/eal_common_proc.c       |   5 +
+ .../common/include/arch/arm/rte_vect.h        |  62 +++++++
+ lib/librte_eal/common/include/rte_bus.h       |  14 ++
+ lib/librte_eal/common/include/rte_common.h    |   2 +-
+ lib/librte_eal/common/malloc_heap.c           |   6 +-
+ lib/librte_eal/common/malloc_mp.c             |  23 +++
+ lib/librte_eal/common/rte_malloc.c            |  10 +-
+ lib/librte_eal/common/rte_option.c            |   3 +-
+ lib/librte_eal/linuxapp/eal/eal.c             |  31 +++-
+ lib/librte_eal/linuxapp/eal/eal_alarm.c       |  30 ++++
+ .../linuxapp/eal/eal_hugepage_info.c          |  26 ++-
+ lib/librte_eal/linuxapp/eal/eal_interrupts.c  |  12 +-
+ lib/librte_eal/linuxapp/eal/eal_memalloc.c    | 113 ++++++++++---
+ lib/librte_eal/linuxapp/eal/eal_memory.c      |  12 +-
+ lib/librte_eal/linuxapp/eal/eal_thread.c      |   2 +
+ lib/librte_eal/linuxapp/eal/eal_vfio.c        |   8 +-
+ lib/librte_ip_frag/rte_ipv6_reassembly.c      |  11 +-
+ lib/librte_mbuf/rte_mbuf.c                    |  51 ++++++
+ lib/librte_mbuf/rte_mbuf.h                    |   8 +
+ lib/librte_mbuf/rte_mbuf_version.map          |   8 +-
+ lib/librte_mempool/rte_mempool.c              | 149 ++++++++++++++---
+ lib/librte_mempool/rte_mempool.h              | 154 ++++++++++++++---
+ lib/librte_mempool/rte_mempool_ops.c          |   1 +
+ lib/librte_mempool/rte_mempool_version.map    |   7 +
+ mk/rte.cpuflags.mk                            |   4 -
+ 45 files changed, 1295 insertions(+), 250 deletions(-)
+ create mode 100644 drivers/net/virtio/virtio_user/vhost_kernel.h
+ create mode 100644 drivers/net/virtio/virtio_user/vhost_kernel_sock.c
+ delete mode 100644 drivers/net/virtio/virtio_user/vhost_kernel_tap.h
+
+diff --git a/buildtools/pmdinfogen/pmdinfogen.h b/buildtools/pmdinfogen/pmdinfogen.h
+index 27bab30e5..b398e99ab 100644
+--- a/buildtools/pmdinfogen/pmdinfogen.h
++++ b/buildtools/pmdinfogen/pmdinfogen.h
+@@ -82,7 +82,7 @@ if ((fend) == ELFDATA2LSB) \
+ 	___x = le##width##toh(x); \
+ else \
+ 	___x = be##width##toh(x); \
+-	___x; \
++___x; \
+ })
+ 
+ #define TO_NATIVE(fend, width, x) CONVERT_NATIVE(fend, width, x)
+diff --git a/drivers/bus/vdev/vdev.c b/drivers/bus/vdev/vdev.c
+index 2c03ca418..cb9e5a039 100644
+--- a/drivers/bus/vdev/vdev.c
++++ b/drivers/bus/vdev/vdev.c
+@@ -540,6 +540,13 @@ vdev_unplug(struct rte_device *dev)
+ 	return rte_vdev_uninit(dev->name);
+ }
+ 
++static enum rte_iova_mode
++vdev_get_iommu_class(void)
++{
++	return RTE_IOVA_VA;
++}
++
++
+ static struct rte_bus rte_vdev_bus = {
+ 	.scan = vdev_scan,
+ 	.probe = vdev_probe,
+@@ -547,6 +554,7 @@ static struct rte_bus rte_vdev_bus = {
+ 	.plug = vdev_plug,
+ 	.unplug = vdev_unplug,
+ 	.parse = vdev_parse,
++	.get_iommu_class = vdev_get_iommu_class,
+ 	.dev_iterate = rte_vdev_dev_iterate,
+ };
+ 
+diff --git a/drivers/mempool/ring/rte_mempool_ring.c b/drivers/mempool/ring/rte_mempool_ring.c
+index bc123fc52..67099e83b 100644
+--- a/drivers/mempool/ring/rte_mempool_ring.c
++++ b/drivers/mempool/ring/rte_mempool_ring.c
+@@ -49,16 +49,14 @@ common_ring_get_count(const struct rte_mempool *mp)
+ static int
+ common_ring_alloc(struct rte_mempool *mp)
+ {
++	int n;
+ 	int rg_flags = 0, ret;
+ 	char rg_name[RTE_RING_NAMESIZE];
+ 	struct rte_ring *r;
+ 
+-	ret = snprintf(rg_name, sizeof(rg_name),
+-		RTE_MEMPOOL_MZ_FORMAT, mp->name);
+-	if (ret < 0 || ret >= (int)sizeof(rg_name)) {
+-		rte_errno = ENAMETOOLONG;
+-		return -rte_errno;
+-	}
++	r = (struct rte_ring *)mp->pool_data;
++	if (r != NULL && r->capacity >= mp->populated_size + mp->dynamic_size)
++		return 0;
+ 
+ 	/* ring flags */
+ 	if (mp->flags & MEMPOOL_F_SP_PUT)
+@@ -66,13 +64,29 @@ common_ring_alloc(struct rte_mempool *mp)
+ 	if (mp->flags & MEMPOOL_F_SC_GET)
+ 		rg_flags |= RING_F_SC_DEQ;
+ 
++	if (mp->flags & MEMPOOL_F_DYNAMIC) {
++		n = RTE_MIN(mp->size, mp->populated_size + mp->dynamic_size);
++
++		ret = snprintf(rg_name, sizeof(rg_name),
++			RTE_MEMPOOL_MZ_FORMAT"_%x", mp->name, n);
++	} else {
++		n = mp->size;
++		ret = snprintf(rg_name, sizeof(rg_name),
++			RTE_MEMPOOL_MZ_FORMAT, mp->name);
++	}
++
++	if (ret < 0 || ret >= (int)sizeof(rg_name)) {
++		rte_errno = ENAMETOOLONG;
++		return -rte_errno;
++	}
++
+ 	/*
+ 	 * Allocate the ring that will be used to store objects.
+ 	 * Ring functions will return appropriate errors if we are
+ 	 * running as a secondary process etc., so no checks made
+ 	 * in this function for that condition.
+ 	 */
+-	r = rte_ring_create(rg_name, rte_align32pow2(mp->size + 1),
++	r = rte_ring_create(rg_name, rte_align32pow2(n + 1),
+ 		mp->socket_id, rg_flags);
+ 	if (r == NULL)
+ 		return -rte_errno;
+diff --git a/drivers/mempool/stack/rte_mempool_stack.c b/drivers/mempool/stack/rte_mempool_stack.c
+index e6d504af5..614c0a0cb 100644
+--- a/drivers/mempool/stack/rte_mempool_stack.c
++++ b/drivers/mempool/stack/rte_mempool_stack.c
+@@ -11,32 +11,124 @@ struct rte_mempool_stack {
+ 
+ 	uint32_t size;
+ 	uint32_t len;
+-	void *objs[];
++	void **objs;
+ };
+ 
+ static int
+ stack_alloc(struct rte_mempool *mp)
+ {
+ 	struct rte_mempool_stack *s;
+-	unsigned n = mp->size;
+-	int size = sizeof(*s) + (n+16)*sizeof(void *);
+-
+-	/* Allocate our local memory structure */
+-	s = rte_zmalloc_socket("mempool-stack",
+-			size,
+-			RTE_CACHE_LINE_SIZE,
+-			mp->socket_id);
+-	if (s == NULL) {
+-		RTE_LOG(ERR, MEMPOOL, "Cannot allocate stack!\n");
+-		return -ENOMEM;
++	unsigned n;
++	void **objs1, **objs2;
++
++	if (mp->pool_data && (mp->flags & MEMPOOL_F_DYNAMIC)) {
++		s = mp->pool_data;
++		n = RTE_MIN(mp->size, mp->populated_size + mp->dynamic_size);
++		objs1 = rte_zmalloc_socket("mempool-stack-objs",
++				(n+16)*sizeof(void *),
++				RTE_CACHE_LINE_SIZE,
++				mp->socket_id);
++		if (objs1 == NULL) {
++			RTE_LOG(ERR, MEMPOOL, "Cannot allocate stack objs!\n");
++			return -ENOMEM;
++		}
++
++		rte_spinlock_lock(&s->sl);
++		if (unlikely(s->len))
++			rte_memcpy(objs1, s->objs, s->len * sizeof(void *));
++		objs2 = s->objs;
++		s->objs = objs1;
++		s->size = n;
++		rte_spinlock_unlock(&s->sl);
++
++		rte_free(objs2);
++	} else {
++		/* Allocate our local memory structure */
++		s = rte_zmalloc_socket("mempool-stack",
++				sizeof(*s),
++				RTE_CACHE_LINE_SIZE,
++				mp->socket_id);
++		if (s == NULL) {
++			RTE_LOG(ERR, MEMPOOL, "Cannot allocate stack!\n");
++			return -ENOMEM;
++		}
++
++		if (mp->flags & MEMPOOL_F_DYNAMIC)
++			n = RTE_MIN(mp->size, mp->populated_size + mp->dynamic_size);
++		else
++			n = mp->size;
++
++		s->objs = rte_zmalloc_socket("mempool-stack-objs",
++				(n+16)*sizeof(void *),
++				RTE_CACHE_LINE_SIZE,
++				mp->socket_id);
++		if (s->objs == NULL) {
++			RTE_LOG(ERR, MEMPOOL, "Cannot allocate stack objs!\n");
++			rte_free(s);
++			return -ENOMEM;
++		}
++
++		rte_spinlock_init(&s->sl);
++		mp->pool_data = s;
++		s->size = n;
+ 	}
+ 
+-	rte_spinlock_init(&s->sl);
++	return 0;
++}
+ 
+-	s->size = n;
+-	mp->pool_data = s;
++static unsigned
++stack_pre_recycle(struct rte_mempool *mp)
++{
++	struct rte_mempool_stack *s = mp->pool_data;
++	unsigned ib = 0, iu = s->len - 1, orig_len = s->len;
++	struct rte_mempool_objhdr *hdr;
++	void *obj;
+ 
+-	return 0;
++	rte_spinlock_lock(&s->sl);
++
++	/* Like how quick sort works, we define pivot as if the chunk of
++	 * the element is full:
++	 * 1) from top to bottom, find an element whose chunk is full, as e1;
++	 * 2) from bottom to top, find an element whose chunk is not full, as e2;
++	 * 3) swap e1 and e2;
++	 * 4) continue.
++	 */
++	while (ib < iu) {
++		while (ib < iu) {
++			hdr = RTE_PTR_SUB(s->objs[ib], sizeof(*hdr));
++			if (hdr->mc->total == hdr->mc->free)
++				break;
++			ib++;
++		}
++
++		while (ib < iu) {
++			hdr = RTE_PTR_SUB(s->objs[iu], sizeof(*hdr));
++			if (hdr->mc->total != hdr->mc->free)
++				break;
++			iu--;
++		}
++
++		if (ib < iu) {
++			obj = s->objs[ib];
++			s->objs[ib] = s->objs[iu];
++			s->objs[iu] = obj;
++			ib++;
++			iu--;
++		}
++	}
++
++	if (iu == ib) {
++		hdr = RTE_PTR_SUB(s->objs[iu], sizeof(*hdr));
++		if (hdr->mc->total == hdr->mc->free)
++			s->len = ib;
++		else
++			s->len = ib + 1;
++	} else
++		s->len = ib;
++
++	rte_spinlock_unlock(&s->sl);
++
++	return orig_len - s->len;
+ }
+ 
+ static int
+@@ -103,6 +195,9 @@ stack_get_count(const struct rte_mempool *mp)
+ static void
+ stack_free(struct rte_mempool *mp)
+ {
++	struct rte_mempool_stack *s = mp->pool_data;
++
++	rte_free(s->objs);
+ 	rte_free((void *)(mp->pool_data));
+ }
+ 
+@@ -112,7 +207,8 @@ static struct rte_mempool_ops ops_stack = {
+ 	.free = stack_free,
+ 	.enqueue = stack_enqueue,
+ 	.dequeue = stack_dequeue,
+-	.get_count = stack_get_count
++	.get_count = stack_get_count,
++	.pre_recycle = stack_pre_recycle,
+ };
+ 
+ MEMPOOL_REGISTER_OPS(ops_stack);
+diff --git a/drivers/net/virtio/Makefile b/drivers/net/virtio/Makefile
+index 6c2c9967b..2e1fc9b5e 100644
+--- a/drivers/net/virtio/Makefile
++++ b/drivers/net/virtio/Makefile
+@@ -41,6 +41,7 @@ ifeq ($(CONFIG_RTE_VIRTIO_USER),y)
+ SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user/vhost_user.c
+ SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user/vhost_kernel.c
+ SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user/vhost_kernel_tap.c
++SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user/vhost_kernel_sock.c
+ SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user/virtio_user_dev.c
+ SRCS-$(CONFIG_RTE_LIBRTE_VIRTIO_PMD) += virtio_user_ethdev.c
+ endif
+diff --git a/drivers/net/virtio/virtio_ethdev.c b/drivers/net/virtio/virtio_ethdev.c
+index 2ba66d291..532c55f27 100644
+--- a/drivers/net/virtio/virtio_ethdev.c
++++ b/drivers/net/virtio/virtio_ethdev.c
+@@ -92,6 +92,8 @@ static void virtio_ack_link_announce(struct rte_eth_dev *dev);
+ static const struct rte_pci_id pci_id_virtio_map[] = {
+ 	{ RTE_PCI_DEVICE(VIRTIO_PCI_VENDORID, VIRTIO_PCI_LEGACY_DEVICEID_NET) },
+ 	{ RTE_PCI_DEVICE(VIRTIO_PCI_VENDORID, VIRTIO_PCI_MODERN_DEVICEID_NET) },
++	{ RTE_PCI_DEVICE(VIRTIO_PCI_VENDORID_ALI, VIRTIO_PCI_LEGACY_DEVICEID_NET) },
++	{ RTE_PCI_DEVICE(VIRTIO_PCI_VENDORID_ALI, VIRTIO_PCI_MODERN_DEVICEID_NET) },
+ 	{ .vendor_id = 0, /* sentinel */ },
+ };
+ 
+@@ -742,6 +744,18 @@ virtio_dev_rx_queue_intr_disable(struct rte_eth_dev *dev, uint16_t queue_id)
+ 	return 0;
+ }
+ 
++static int
++virtio_rss_hash_update(struct rte_eth_dev *dev,
++                       struct rte_eth_rss_conf *rss_conf __rte_unused)
++{
++       struct virtio_hw *hw = dev->data->dev_private;
++
++       if (hw->virtio_user_dev)
++               return 0;
++
++       return -1;
++}
++
+ /*
+  * dev_ops for virtio, bare necessities for basic operation
+  */
+@@ -776,6 +790,7 @@ static const struct eth_dev_ops virtio_eth_dev_ops = {
+ 	.mac_addr_add            = virtio_mac_addr_add,
+ 	.mac_addr_remove         = virtio_mac_addr_remove,
+ 	.mac_addr_set            = virtio_mac_addr_set,
++	.rss_hash_update         = virtio_rss_hash_update,
+ };
+ 
+ static void
+@@ -1454,7 +1469,6 @@ virtio_init_device(struct rte_eth_dev *eth_dev, uint64_t req_features)
+ 	struct virtio_net_config *config;
+ 	struct virtio_net_config local_config;
+ 	struct rte_pci_device *pci_dev = NULL;
+-	int ret;
+ 
+ 	/* Reset the device although not necessary at startup */
+ 	vtpci_reset(hw);
+@@ -1571,6 +1585,20 @@ virtio_init_device(struct rte_eth_dev *eth_dev, uint64_t req_features)
+ 			VLAN_TAG_LEN - hw->vtnet_hdr_size;
+ 	}
+ 
++	if (pci_dev)
++		PMD_INIT_LOG(DEBUG, "port %d vendorID=0x%x deviceID=0x%x",
++			eth_dev->data->port_id, pci_dev->id.vendor_id,
++			pci_dev->id.device_id);
++
++	return 0;
++}
++
++static int
++virtio_init_device_post(struct rte_eth_dev *eth_dev)
++{
++	int ret;
++	struct virtio_hw *hw;
++
+ 	ret = virtio_alloc_queues(eth_dev);
+ 	if (ret < 0)
+ 		return ret;
+@@ -1582,13 +1610,9 @@ virtio_init_device(struct rte_eth_dev *eth_dev, uint64_t req_features)
+ 		}
+ 	}
+ 
++	hw = eth_dev->data->dev_private;
+ 	vtpci_reinit_complete(hw);
+ 
+-	if (pci_dev)
+-		PMD_INIT_LOG(DEBUG, "port %d vendorID=0x%x deviceID=0x%x",
+-			eth_dev->data->port_id, pci_dev->id.vendor_id,
+-			pci_dev->id.device_id);
+-
+ 	return 0;
+ }
+ 
+@@ -1638,6 +1662,13 @@ virtio_set_vtpci_ops(struct virtio_hw *hw)
+ 		VTPCI_OPS(hw) = &legacy_ops;
+ }
+ 
++#define VIRTIO_PMD_DEFAULT_GUEST_FEATURES_TLDK \
++	(VIRTIO_PMD_DEFAULT_GUEST_FEATURES |   \
++	 1ULL << VIRTIO_NET_F_GUEST_CSUM   |   \
++	 1ULL << VIRTIO_NET_F_CSUM         |   \
++	 1ULL << VIRTIO_NET_F_HOST_TSO4    |   \
++	 1ULL << VIRTIO_NET_F_HOST_TSO6)
++
+ /*
+  * This function is based on probe() function in virtio_pci.c
+  * It returns 0 on success.
+@@ -1685,7 +1716,7 @@ eth_virtio_dev_init(struct rte_eth_dev *eth_dev)
+ 	}
+ 
+ 	/* reset device and negotiate default features */
+-	ret = virtio_init_device(eth_dev, VIRTIO_PMD_DEFAULT_GUEST_FEATURES);
++	ret = virtio_init_device(eth_dev, VIRTIO_PMD_DEFAULT_GUEST_FEATURES_TLDK);
+ 	if (ret < 0)
+ 		goto out;
+ 
+@@ -1783,7 +1814,7 @@ static struct rte_pci_driver rte_virtio_pmd = {
+ 		.name = "net_virtio",
+ 	},
+ 	.id_table = pci_id_virtio_map,
+-	.drv_flags = 0,
++	.drv_flags = RTE_PCI_DRV_IOVA_AS_VA,
+ 	.probe = eth_virtio_pci_probe,
+ 	.remove = eth_virtio_pci_remove,
+ };
+@@ -1826,39 +1857,39 @@ virtio_dev_configure(struct rte_eth_dev *dev)
+ 	int ret;
+ 
+ 	PMD_INIT_LOG(DEBUG, "configure");
+-	req_features = VIRTIO_PMD_DEFAULT_GUEST_FEATURES;
+ 
+-	if (dev->data->dev_conf.intr_conf.rxq) {
+-		ret = virtio_init_device(dev, hw->req_guest_features);
+-		if (ret < 0)
+-			return ret;
+-	}
++	req_features = VIRTIO_PMD_DEFAULT_GUEST_FEATURES_TLDK;
+ 
+-	if (rx_offloads & (DEV_RX_OFFLOAD_UDP_CKSUM |
+-			   DEV_RX_OFFLOAD_TCP_CKSUM))
+-		req_features |= (1ULL << VIRTIO_NET_F_GUEST_CSUM);
++	if (!(rx_offloads & (DEV_RX_OFFLOAD_UDP_CKSUM |
++			     DEV_RX_OFFLOAD_TCP_CKSUM)))
++		req_features ^= (1ULL << VIRTIO_NET_F_GUEST_CSUM);
+ 
+ 	if (rx_offloads & DEV_RX_OFFLOAD_TCP_LRO)
+ 		req_features |=
+ 			(1ULL << VIRTIO_NET_F_GUEST_TSO4) |
+ 			(1ULL << VIRTIO_NET_F_GUEST_TSO6);
+ 
+-	if (tx_offloads & (DEV_TX_OFFLOAD_UDP_CKSUM |
+-			   DEV_TX_OFFLOAD_TCP_CKSUM))
+-		req_features |= (1ULL << VIRTIO_NET_F_CSUM);
++	if (!(tx_offloads & (DEV_TX_OFFLOAD_UDP_CKSUM |
++			     DEV_TX_OFFLOAD_TCP_CKSUM)))
++		req_features ^= (1ULL << VIRTIO_NET_F_CSUM);
+ 
+-	if (tx_offloads & DEV_TX_OFFLOAD_TCP_TSO)
+-		req_features |=
++	if (!(tx_offloads & DEV_TX_OFFLOAD_TCP_TSO))
++		req_features ^=
+ 			(1ULL << VIRTIO_NET_F_HOST_TSO4) |
+ 			(1ULL << VIRTIO_NET_F_HOST_TSO6);
+ 
+ 	/* if request features changed, reinit the device */
+ 	if (req_features != hw->req_guest_features) {
++		PMD_DRV_LOG(WARNING, "Shall not be here for a virtio VF.");
+ 		ret = virtio_init_device(dev, req_features);
+ 		if (ret < 0)
+ 			return ret;
+ 	}
+ 
++	ret = virtio_init_device_post(dev);
++	if (ret < 0)
++		return ret;
++
+ 	if ((rx_offloads & (DEV_RX_OFFLOAD_UDP_CKSUM |
+ 			    DEV_RX_OFFLOAD_TCP_CKSUM)) &&
+ 		!vtpci_with_feature(hw, VIRTIO_NET_F_GUEST_CSUM)) {
+@@ -1970,7 +2001,8 @@ virtio_dev_start(struct rte_eth_dev *dev)
+ 	 */
+ 	if (dev->data->dev_conf.intr_conf.lsc ||
+ 	    dev->data->dev_conf.intr_conf.rxq) {
+-		virtio_intr_disable(dev);
++		//don't disable intr here to avoid affect initialization of ENI
++		//virtio_intr_disable(dev);
+ 
+ 		/* Setup interrupt callback  */
+ 		if (dev->data->dev_flags & RTE_ETH_DEV_INTR_LSC)
+@@ -2172,6 +2204,7 @@ virtio_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+ {
+ 	uint64_t tso_mask, host_features;
+ 	struct virtio_hw *hw = dev->data->dev_private;
++	struct virtqueue *vq;
+ 
+ 	dev_info->speed_capa = ETH_LINK_SPEED_10G; /* fake value */
+ 
+@@ -2187,6 +2220,7 @@ virtio_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+ 	dev_info->rx_offload_capa = DEV_RX_OFFLOAD_VLAN_STRIP;
+ 	if (host_features & (1ULL << VIRTIO_NET_F_GUEST_CSUM)) {
+ 		dev_info->rx_offload_capa |=
++			DEV_RX_OFFLOAD_IPV4_CKSUM |
+ 			DEV_RX_OFFLOAD_TCP_CKSUM |
+ 			DEV_RX_OFFLOAD_UDP_CKSUM;
+ 	}
+@@ -2208,6 +2242,23 @@ virtio_dev_info_get(struct rte_eth_dev *dev, struct rte_eth_dev_info *dev_info)
+ 		(1ULL << VIRTIO_NET_F_HOST_TSO6);
+ 	if ((host_features & tso_mask) == tso_mask)
+ 		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_TCP_TSO;
++
++	if (host_features & (1ULL << VIRTIO_NET_F_HOST_UFO))
++		dev_info->tx_offload_capa |= DEV_TX_OFFLOAD_UDP_TSO;
++
++	if (hw->vqs) {
++		vq = hw->vqs[VTNET_SQ_RQ_QUEUE_IDX];
++		dev_info->rx_desc_lim.nb_max = vq->vq_nentries;
++		dev_info->rx_desc_lim.nb_min = 256;
++
++		vq = hw->vqs[VTNET_SQ_TQ_QUEUE_IDX];
++		dev_info->tx_desc_lim.nb_max = vq->vq_nentries;
++		dev_info->tx_desc_lim.nb_min = 256;
++	}
++
++	if (hw->virtio_user_dev)
++		dev_info->flow_type_rss_offloads =
++			ETH_RSS_IP | ETH_RSS_UDP | ETH_RSS_TCP;
+ }
+ 
+ /*
+diff --git a/drivers/net/virtio/virtio_pci.c b/drivers/net/virtio/virtio_pci.c
+index c8883c32e..2df9abd7d 100644
+--- a/drivers/net/virtio/virtio_pci.c
++++ b/drivers/net/virtio/virtio_pci.c
+@@ -257,6 +257,28 @@ const struct virtio_pci_ops legacy_ops = {
+ 	.notify_queue	= legacy_notify_queue,
+ };
+ 
++static void
++legacy_notify_queue_mmio(struct virtio_hw *hw, struct virtqueue *vq)
++{
++	*hw->notify_base = vq->vq_queue_index;
++}
++
++const struct virtio_pci_ops legacy_ops_mmio = {
++	.read_dev_cfg	= legacy_read_dev_config,
++	.write_dev_cfg	= legacy_write_dev_config,
++	.get_status	= legacy_get_status,
++	.set_status	= legacy_set_status,
++	.get_features	= legacy_get_features,
++	.set_features	= legacy_set_features,
++	.get_isr	= legacy_get_isr,
++	.set_config_irq	= legacy_set_config_irq,
++	.set_queue_irq  = legacy_set_queue_irq,
++	.get_queue_num	= legacy_get_queue_num,
++	.setup_queue	= legacy_setup_queue,
++	.del_queue	= legacy_del_queue,
++	.notify_queue	= legacy_notify_queue_mmio,
++};
++
+ static inline void
+ io_write64_twopart(uint64_t val, uint32_t *lo, uint32_t *hi)
+ {
+@@ -689,8 +711,18 @@ vtpci_init(struct rte_pci_device *dev, struct virtio_hw *hw)
+ 		return -1;
+ 	}
+ 
+-	virtio_hw_internal[hw->port_id].vtpci_ops = &legacy_ops;
+-	hw->modern   = 0;
++
++	if (dev->mem_resource[0].addr) {
++		/* For virtio VF that uses mmio for ioport as BAR 0, we can
++		 * optimize it here by using mmio read/write.
++		 */
++		hw->notify_base = (void *)((uintptr_t)dev->mem_resource[0].addr +
++					   VIRTIO_PCI_QUEUE_NOTIFY);
++		virtio_hw_internal[hw->port_id].vtpci_ops = &legacy_ops_mmio;
++	} else
++		virtio_hw_internal[hw->port_id].vtpci_ops = &legacy_ops;
++
++	hw->modern = 0;
+ 
+ 	return 0;
+ }
+diff --git a/drivers/net/virtio/virtio_pci.h b/drivers/net/virtio/virtio_pci.h
+index e961a58ca..a02ad8100 100644
+--- a/drivers/net/virtio/virtio_pci.h
++++ b/drivers/net/virtio/virtio_pci.h
+@@ -16,6 +16,7 @@ struct virtqueue;
+ struct virtnet_ctl;
+ 
+ /* VirtIO PCI vendor/device ID. */
++#define VIRTIO_PCI_VENDORID_ALI	0x1DED
+ #define VIRTIO_PCI_VENDORID     0x1AF4
+ #define VIRTIO_PCI_LEGACY_DEVICEID_NET 0x1000
+ #define VIRTIO_PCI_MODERN_DEVICEID_NET 0x1041
+diff --git a/drivers/net/virtio/virtio_rxtx.c b/drivers/net/virtio/virtio_rxtx.c
+index eb891433e..6b252fa64 100644
+--- a/drivers/net/virtio/virtio_rxtx.c
++++ b/drivers/net/virtio/virtio_rxtx.c
+@@ -832,6 +832,7 @@ virtio_rx_offload(struct rte_mbuf *m, struct virtio_net_hdr *hdr)
+ 		l4_supported = 1;
+ 
+ 	if (hdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) {
++		m->ol_flags |= PKT_RX_IP_CKSUM_NONE;
+ 		hdrlen = hdr_lens.l2_len + hdr_lens.l3_len + hdr_lens.l4_len;
+ 		if (hdr->csum_start <= hdrlen && l4_supported) {
+ 			m->ol_flags |= PKT_RX_L4_CKSUM_NONE;
+@@ -844,6 +845,10 @@ virtio_rx_offload(struct rte_mbuf *m, struct virtio_net_hdr *hdr)
+ 			 */
+ 			uint16_t csum = 0, off;
+ 
++			if(hdr->csum_start > rte_pktmbuf_pkt_len(m)) {
++				return -EINVAL;
++			}
++
+ 			rte_raw_cksum_mbuf(m, hdr->csum_start,
+ 				rte_pktmbuf_pkt_len(m) - hdr->csum_start,
+ 				&csum);
+@@ -855,6 +860,7 @@ virtio_rx_offload(struct rte_mbuf *m, struct virtio_net_hdr *hdr)
+ 					off) = csum;
+ 		}
+ 	} else if (hdr->flags & VIRTIO_NET_HDR_F_DATA_VALID && l4_supported) {
++		m->ol_flags |= PKT_RX_IP_CKSUM_GOOD;
+ 		m->ol_flags |= PKT_RX_L4_CKSUM_GOOD;
+ 	}
+ 
+@@ -869,6 +875,7 @@ virtio_rx_offload(struct rte_mbuf *m, struct virtio_net_hdr *hdr)
+ 		/* Update mss lengthes in mbuf */
+ 		m->tso_segsz = hdr->gso_size;
+ 		switch (hdr->gso_type & ~VIRTIO_NET_HDR_GSO_ECN) {
++			case VIRTIO_NET_HDR_GSO_UDP:
+ 			case VIRTIO_NET_HDR_GSO_TCPV4:
+ 			case VIRTIO_NET_HDR_GSO_TCPV6:
+ 				m->ol_flags |= PKT_RX_LRO | \
+@@ -1085,7 +1092,6 @@ virtio_recv_mergeable_pkts_inorder(void *rx_queue,
+ 			rxm->data_len = (uint16_t)(len[i]);
+ 
+ 			rx_pkts[nb_rx]->pkt_len += (uint32_t)(len[i]);
+-			rx_pkts[nb_rx]->data_len += (uint16_t)(len[i]);
+ 
+ 			if (prev)
+ 				prev->next = rxm;
+@@ -1105,7 +1111,6 @@ virtio_recv_mergeable_pkts_inorder(void *rx_queue,
+ 		uint16_t rcv_cnt = RTE_MIN((uint16_t)seg_res,
+ 					VIRTIO_MBUF_BURST_SZ);
+ 
+-		prev = rcv_pkts[nb_rx];
+ 		if (likely(VIRTQUEUE_NUSED(vq) >= rcv_cnt)) {
+ 			num = virtqueue_dequeue_rx_inorder(vq, rcv_pkts, len,
+ 							   rcv_cnt);
+@@ -1121,7 +1126,6 @@ virtio_recv_mergeable_pkts_inorder(void *rx_queue,
+ 				prev->next = rxm;
+ 				prev = rxm;
+ 				rx_pkts[nb_rx]->pkt_len += len[extra_idx];
+-				rx_pkts[nb_rx]->data_len += len[extra_idx];
+ 				extra_idx += 1;
+ 			};
+ 			seg_res -= rcv_cnt;
+@@ -1214,6 +1218,7 @@ virtio_recv_mergeable_pkts(void *rx_queue,
+ 
+ 	while (i < nb_used) {
+ 		struct virtio_net_hdr_mrg_rxbuf *header;
++		uint8_t seg_drop = 0;
+ 
+ 		if (nb_rx == nb_pkts)
+ 			break;
+@@ -1257,48 +1262,55 @@ virtio_recv_mergeable_pkts(void *rx_queue,
+ 
+ 		if (hw->has_rx_offload &&
+ 				virtio_rx_offload(rxm, &header->hdr) < 0) {
++			seg_drop = 1;
++			nb_enqueued++;
+ 			virtio_discard_rxbuf(vq, rxm);
+ 			rxvq->stats.errors++;
+-			continue;
+ 		}
+ 
+ 		seg_res = seg_num - 1;
+ 
++		if (VIRTQUEUE_NUSED(vq) < seg_res) {
++			PMD_RX_LOG(ERR, "No enough segments for packet.");
++			if (!seg_drop) {
++				seg_drop = 1;
++				nb_enqueued++;
++				virtio_discard_rxbuf(vq, rxm);
++				rxvq->stats.errors++;
++			}
++		}
++
+ 		while (seg_res != 0) {
+ 			/*
+ 			 * Get extra segments for current uncompleted packet.
+ 			 */
+ 			uint16_t  rcv_cnt =
+ 				RTE_MIN(seg_res, RTE_DIM(rcv_pkts));
+-			if (likely(VIRTQUEUE_NUSED(vq) >= rcv_cnt)) {
+-				uint32_t rx_num =
+-					virtqueue_dequeue_burst_rx(vq,
+-					rcv_pkts, len, rcv_cnt);
+-				i += rx_num;
+-				rcv_cnt = rx_num;
+-			} else {
+-				PMD_RX_LOG(ERR,
+-					   "No enough segments for packet.");
+-				nb_enqueued++;
+-				virtio_discard_rxbuf(vq, rxm);
+-				rxvq->stats.errors++;
+-				break;
+-			}
++
++			uint32_t rx_num = virtqueue_dequeue_burst_rx(vq, rcv_pkts, len, rcv_cnt);
++			i += rx_num;
++			rcv_cnt = rx_num;
+ 
+ 			extra_idx = 0;
+ 
+ 			while (extra_idx < rcv_cnt) {
+ 				rxm = rcv_pkts[extra_idx];
+ 
+-				rxm->data_off = RTE_PKTMBUF_HEADROOM - hdr_size;
+-				rxm->pkt_len = (uint32_t)(len[extra_idx]);
+-				rxm->data_len = (uint16_t)(len[extra_idx]);
++				if (seg_drop) {
++					nb_enqueued++;
++					virtio_discard_rxbuf(vq, rxm);
++				}
++				else {
++					rxm->data_off = RTE_PKTMBUF_HEADROOM - hdr_size;
++					rxm->pkt_len = (uint32_t)(len[extra_idx]);
++					rxm->data_len = (uint16_t)(len[extra_idx]);
+ 
+-				if (prev)
+-					prev->next = rxm;
++					if (prev)
++						prev->next = rxm;
+ 
+-				prev = rxm;
+-				rx_pkts[nb_rx]->pkt_len += rxm->pkt_len;
++					prev = rxm;
++					rx_pkts[nb_rx]->pkt_len += rxm->pkt_len;
++				}
+ 				extra_idx++;
+ 			};
+ 			seg_res -= rcv_cnt;
+diff --git a/drivers/net/virtio/virtio_user/vhost_kernel.c b/drivers/net/virtio/virtio_user/vhost_kernel.c
+index 6b19180d7..618a6311d 100644
+--- a/drivers/net/virtio/virtio_user/vhost_kernel.c
++++ b/drivers/net/virtio/virtio_user/vhost_kernel.c
+@@ -6,13 +6,14 @@
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <unistd.h>
++#include <sys/ioctl.h>
+ 
+ #include <rte_memory.h>
+ #include <rte_eal_memconfig.h>
+ 
+ #include "vhost.h"
+ #include "virtio_user_dev.h"
+-#include "vhost_kernel_tap.h"
++#include "vhost_kernel.h"
+ 
+ struct vhost_memory_kernel {
+ 	uint32_t nregions;
+@@ -150,29 +151,28 @@ prepare_vhost_memory_kernel(void)
+ #define VHOST_KERNEL_HOST_OFFLOADS_MASK		\
+ 	((1ULL << VIRTIO_NET_F_HOST_TSO4) |	\
+ 	 (1ULL << VIRTIO_NET_F_HOST_TSO6) |	\
++	 (1ULL << VIRTIO_NET_F_HOST_UFO)  | \
+ 	 (1ULL << VIRTIO_NET_F_CSUM))
+ 
+-static unsigned int
+-tap_support_features(void)
++#define PATH_SYS_CLASS_NET "/sys/class/net"
++
++static int
++vhost_kernel_is_tap(struct virtio_user_dev *dev)
+ {
+-	int tapfd;
+-	unsigned int tap_features;
++	char path[128];
+ 
+-	tapfd = open(PATH_NET_TUN, O_RDWR);
+-	if (tapfd < 0) {
+-		PMD_DRV_LOG(ERR, "fail to open %s: %s",
+-			    PATH_NET_TUN, strerror(errno));
+-		return -1;
+-	}
++	if (dev->ifname == NULL)
++		return 0;
+ 
+-	if (ioctl(tapfd, TUNGETFEATURES, &tap_features) == -1) {
+-		PMD_DRV_LOG(ERR, "TUNGETFEATURES failed: %s", strerror(errno));
+-		close(tapfd);
+-		return -1;
+-	}
++	snprintf(path, 128, PATH_SYS_CLASS_NET"/%s", dev->ifname);
++	if(access(path, F_OK) == -1)
++		return 1;
+ 
+-	close(tapfd);
+-	return tap_features;
++	snprintf(path, 128, PATH_SYS_CLASS_NET"/%s/tun_flags", dev->ifname);
++	if(access(path, F_OK) != -1)
++		return 1;
++
++	return 0;
+ }
+ 
+ static int
+@@ -186,7 +186,6 @@ vhost_kernel_ioctl(struct virtio_user_dev *dev,
+ 	struct vhost_memory_kernel *vm = NULL;
+ 	int vhostfd;
+ 	unsigned int queue_sel;
+-	unsigned int features;
+ 
+ 	PMD_DRV_LOG(INFO, "%s", vhost_msg_strings[req]);
+ 
+@@ -240,21 +239,36 @@ vhost_kernel_ioctl(struct virtio_user_dev *dev,
+ 	}
+ 
+ 	if (!ret && req_kernel == VHOST_GET_FEATURES) {
+-		features = tap_support_features();
+-		/* with tap as the backend, all these features are supported
++		int vnet_hdr, mq;
++
++		if (vhost_kernel_is_tap(dev))
++			tap_support_features(&vnet_hdr, &mq);
++		else
++			sock_support_features(dev->be_fd, &vnet_hdr, &mq);
++
++		/* with kernel vhost, all these features are supported
+ 		 * but not claimed by vhost-net, so we add them back when
+ 		 * reporting to upper layer.
+ 		 */
+-		if (features & IFF_VNET_HDR) {
++		if (vnet_hdr) {
+ 			*((uint64_t *)arg) |= VHOST_KERNEL_GUEST_OFFLOADS_MASK;
+ 			*((uint64_t *)arg) |= VHOST_KERNEL_HOST_OFFLOADS_MASK;
+ 		}
+ 
+-		/* vhost_kernel will not declare this feature, but it does
++		/* kernel vhost will not declare this feature, but it does
+ 		 * support multi-queue.
+ 		 */
+-		if (features & IFF_MULTI_QUEUE)
++		if (mq)
+ 			*(uint64_t *)arg |= (1ull << VIRTIO_NET_F_MQ);
++
++		/* raw socket only supports vnet header size of 10, so we must
++		 * eliminate below features.
++		 */
++		if (!vhost_kernel_is_tap(dev) &&
++		    vnet_hdr == sizeof(struct virtio_net_hdr)) {
++			*((uint64_t *)arg) &= ~(1ull << VIRTIO_NET_F_MRG_RXBUF);
++			*((uint64_t *)arg) &= ~(1ull << VIRTIO_F_VERSION_1);
++		}
+ 	}
+ 
+ 	if (vm)
+@@ -282,6 +296,15 @@ vhost_kernel_setup(struct virtio_user_dev *dev)
+ 
+ 	get_vhost_kernel_max_regions();
+ 
++	if (dev->vhost_fd >= 0) {
++		if (dev->max_queue_pairs != 1) {
++			PMD_DRV_LOG(ERR, "vhost_fd=<int> param can not be used when multi-queue is enabled");
++			return -1;
++		}
++		dev->vhostfds[0] = dev->vhost_fd;
++		return 0;
++	}
++
+ 	for (i = 0; i < dev->max_queue_pairs; ++i) {
+ 		vhostfd = open(dev->path, O_RDWR);
+ 		if (vhostfd < 0) {
+@@ -333,7 +356,8 @@ vhost_kernel_enable_queue_pair(struct virtio_user_dev *dev,
+ 
+ 	if (!enable) {
+ 		if (dev->tapfds[pair_idx] >= 0) {
+-			close(dev->tapfds[pair_idx]);
++			if (dev->be_fd < 0)
++				close(dev->tapfds[pair_idx]);
+ 			dev->tapfds[pair_idx] = -1;
+ 		}
+ 		return vhost_kernel_set_backend(vhostfd, -1);
+@@ -347,8 +371,18 @@ vhost_kernel_enable_queue_pair(struct virtio_user_dev *dev,
+ 	else
+ 		hdr_size = sizeof(struct virtio_net_hdr);
+ 
+-	tapfd = vhost_kernel_open_tap(&dev->ifname, hdr_size, req_mq,
+-			 (char *)dev->mac_addr, dev->features);
++	if (vhost_kernel_is_tap(dev)) {
++		tapfd = vhost_kernel_open_tap(&dev->ifname, hdr_size,
++				req_mq, (char *)dev->mac_addr, dev->features);
++	} else {
++		if (pair_idx == 0 && dev->be_fd >= 0)
++			tapfd = vhost_kernel_set_sock(dev->be_fd,
++					hdr_size, req_mq);
++		else
++			tapfd = vhost_kernel_open_sock(dev->ifname,
++					hdr_size, dev->mac_addr, req_mq);
++	}
++
+ 	if (tapfd < 0) {
+ 		PMD_DRV_LOG(ERR, "fail to open tap for vhost kernel");
+ 		return -1;
+diff --git a/drivers/net/virtio/virtio_user/vhost_kernel.h b/drivers/net/virtio/virtio_user/vhost_kernel.h
+new file mode 100644
+index 000000000..75d6c5bf6
+--- /dev/null
++++ b/drivers/net/virtio/virtio_user/vhost_kernel.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2016 Intel Corporation
++ */
++
++int vhost_kernel_open_tap(char **p_ifname, int hdr_size, int req_mq,
++			 const char *mac, uint64_t features);
++
++void tap_support_features(int *vnet_hdr, int *mq);
++
++int vhost_kernel_open_sock(char *ifname, int hdr_size,
++			   uint8_t *mac, int req_mq);
++
++int vhost_kernel_set_sock(int sockfd, int hdr_size, int req_mq);
++
++void sock_support_features(int fd, int *vnet_hdr, int *mq);
+diff --git a/drivers/net/virtio/virtio_user/vhost_kernel_sock.c b/drivers/net/virtio/virtio_user/vhost_kernel_sock.c
+new file mode 100644
+index 000000000..5c07fbfba
+--- /dev/null
++++ b/drivers/net/virtio/virtio_user/vhost_kernel_sock.c
+@@ -0,0 +1,155 @@
++/* SPDX-License-Identifier: BSD-3-Clause
++ * Copyright(c) 2023 Ant Group Corporation
++ */
++
++#include <unistd.h>
++#include <sys/types.h>
++#include <sys/stat.h>
++#include <fcntl.h>
++#include <net/if.h>
++#include <net/if_arp.h>
++#include <errno.h>
++#include <string.h>
++#include <limits.h>
++#include <sys/socket.h>
++#include <arpa/inet.h>
++#include <netpacket/packet.h>
++#include <linux/if_ether.h>
++#include <sys/ioctl.h>
++
++#include <rte_ether.h>
++
++#include "../virtqueue.h"
++#include "../virtio_logs.h"
++#include "vhost_kernel.h"
++
++#ifndef PACKET_VNET_HDR
++#define PACKET_VNET_HDR		15
++#endif
++
++#ifndef PACKET_FANOUT
++#define PACKET_FANOUT		18
++#endif
++
++#ifndef PACKET_VNET_HDR_SZ
++#define PACKET_VNET_HDR_SZ	128
++#endif
++
++void
++sock_support_features(int fd, int *vnet_hdr, int *mq)
++{
++	int hdr_size = sizeof(struct virtio_net_hdr_mrg_rxbuf);
++	int local_fd = 0;
++
++	if (fd < 0) {
++		fd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
++		if (fd < 0) {
++			*mq = 0;
++			*vnet_hdr = 0;
++			return;
++		}
++		local_fd = 1;
++	}
++
++	*mq = 1;
++
++	if (setsockopt(fd, SOL_PACKET, PACKET_VNET_HDR_SZ,
++			(void *)&hdr_size, sizeof(hdr_size))) {
++		*vnet_hdr = sizeof(struct virtio_net_hdr);
++	} else
++		*vnet_hdr = hdr_size;
++
++	if (local_fd)
++		close(fd);
++}
++
++int
++vhost_kernel_set_sock(int sockfd, int hdr_size, int req_mq)
++{
++	int ret;
++	int fanout_type = 0; /* PACKET_FANOUT_HASH */
++
++	if (hdr_size == sizeof(struct virtio_net_hdr))
++		ret = setsockopt(sockfd, SOL_PACKET, PACKET_VNET_HDR,
++				 (void *)&hdr_size, sizeof(hdr_size));
++	else
++		ret = setsockopt(sockfd, SOL_PACKET, PACKET_VNET_HDR_SZ,
++				 (void *)&hdr_size, sizeof(hdr_size));
++	if (ret) {
++		PMD_DRV_LOG(ERR, "failed to set vnet hdr (%d): %s",
++			    hdr_size, strerror(errno));
++		close(sockfd);
++		return -1;
++	}
++
++	if (fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL) | O_NONBLOCK))
++	{
++		PMD_DRV_LOG(ERR, "fcntl O_NONBLOCK failed! %s",
++			    strerror(errno));
++		close(sockfd);
++		return -1;
++	}
++
++	if (req_mq) {
++		if (setsockopt(sockfd, SOL_PACKET, PACKET_FANOUT,
++				(void *)&fanout_type, sizeof(fanout_type))) {
++			PMD_DRV_LOG(ERR, "PACKET_FANOUT failed! %s",
++				    strerror(errno));
++			close(sockfd);
++			return -1;
++		}
++	}
++
++	return sockfd;
++}
++
++int
++vhost_kernel_open_sock(char *ifname, int hdr_size,
++			uint8_t *mac, int req_mq)
++{
++	int sockfd;
++	struct ifreq ifr;
++	struct sockaddr_ll addr_ll;
++
++	sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
++	if (sockfd < 0) {
++		PMD_DRV_LOG(ERR, "socket failed: %s", strerror(errno));
++		return -1;
++	}
++	
++	memset(&ifr, 0, sizeof(ifr));
++	strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
++
++	if (ioctl(sockfd, SIOCGIFINDEX, (void*)&ifr)) {
++		PMD_DRV_LOG(ERR, "SIOCGIFINDEX failed: %s", strerror(errno));
++		close(sockfd);
++		return -1;
++	}
++
++	memset(&addr_ll, 0, sizeof(addr_ll));
++	addr_ll.sll_ifindex   = ifr.ifr_ifindex;
++	addr_ll.sll_family    = AF_PACKET;
++	addr_ll.sll_protocol  = htons(ETH_P_ALL);
++	addr_ll.sll_hatype    = 0;
++	//addr_ll.sll_pkttype   = PACKET_HOST;
++	//addr_ll.sll_halen     = ETH_ALEN;
++	if (bind(sockfd, (struct sockaddr*)&addr_ll, sizeof(addr_ll))) {
++		PMD_DRV_LOG(ERR, "bind failed: %s", strerror(errno));
++		close(sockfd);
++    		return -1;
++	}
++
++	ifr.ifr_flags |= IFF_PROMISC | IFF_UP;
++	
++	if (ioctl(sockfd, SIOCSIFFLAGS, (char*)&ifr)) {
++		PMD_DRV_LOG(ERR, "SIOCSIFFLAGS failed: %s", strerror(errno));
++		close(sockfd);
++    		return -1;
++	}
++
++	ifr.ifr_hwaddr.sa_family = ARPHRD_ETHER;
++	if (ioctl(sockfd, SIOCGIFHWADDR, &ifr) == 0)
++		memcpy(mac, ifr.ifr_hwaddr.sa_data, ETHER_ADDR_LEN);
++
++	return vhost_kernel_set_sock(sockfd, hdr_size, req_mq);
++}
+diff --git a/drivers/net/virtio/virtio_user/vhost_kernel_tap.c b/drivers/net/virtio/virtio_user/vhost_kernel_tap.c
+index a3faf1d0c..85dd24dd6 100644
+--- a/drivers/net/virtio/virtio_user/vhost_kernel_tap.c
++++ b/drivers/net/virtio/virtio_user/vhost_kernel_tap.c
+@@ -11,13 +11,75 @@
+ #include <errno.h>
+ #include <string.h>
+ #include <limits.h>
++#include <sys/ioctl.h>
+ 
+ #include <rte_ether.h>
+ 
+-#include "vhost_kernel_tap.h"
++#include "vhost_kernel.h"
+ #include "../virtio_logs.h"
+ #include "../virtio_pci.h"
+ 
++/* TUN ioctls */
++#define TUNSETIFF     _IOW('T', 202, int)
++#define TUNGETFEATURES _IOR('T', 207, unsigned int)
++#define TUNSETOFFLOAD  _IOW('T', 208, unsigned int)
++#define TUNGETIFF      _IOR('T', 210, unsigned int)
++#define TUNSETSNDBUF   _IOW('T', 212, int)
++#define TUNGETVNETHDRSZ _IOR('T', 215, int)
++#define TUNSETVNETHDRSZ _IOW('T', 216, int)
++#define TUNSETQUEUE  _IOW('T', 217, int)
++#define TUNSETVNETLE _IOW('T', 220, int)
++#define TUNSETVNETBE _IOW('T', 222, int)
++
++/* TUNSETIFF ifr flags */
++#define IFF_TAP          0x0002
++#define IFF_NO_PI        0x1000
++#define IFF_ONE_QUEUE    0x2000
++#define IFF_VNET_HDR     0x4000
++#define IFF_MULTI_QUEUE  0x0100
++#define IFF_ATTACH_QUEUE 0x0200
++#define IFF_DETACH_QUEUE 0x0400
++
++/* Features for GSO (TUNSETOFFLOAD). */
++#define TUN_F_CSUM	0x01	/* You can hand me unchecksummed packets. */
++#define TUN_F_TSO4	0x02	/* I can handle TSO for IPv4 packets */
++#define TUN_F_TSO6	0x04	/* I can handle TSO for IPv6 packets */
++#define TUN_F_TSO_ECN	0x08	/* I can handle TSO with ECN bits. */
++#define TUN_F_UFO	0x10	/* I can handle UFO packets */
++
++/* Constants */
++#define PATH_NET_TUN	"/dev/net/tun"
++
++void
++tap_support_features(int *vnet_hdr, int *mq)
++{
++	int tapfd;
++	unsigned int tap_features;
++
++	*vnet_hdr = 0;
++	*mq = 0;
++
++	tapfd = open(PATH_NET_TUN, O_RDWR);
++	if (tapfd < 0) {
++		PMD_DRV_LOG(ERR, "fail to open %s: %s",
++			    PATH_NET_TUN, strerror(errno));
++		return;
++	}
++
++	if (ioctl(tapfd, TUNGETFEATURES, &tap_features) == -1) {
++		PMD_DRV_LOG(ERR, "TUNGETFEATURES failed: %s", strerror(errno));
++		close(tapfd);
++		return;
++	}
++
++	close(tapfd);
++
++	if (tap_features & IFF_VNET_HDR)
++		*vnet_hdr = 1;
++	if (tap_features & IFF_MULTI_QUEUE)
++		*mq = 1;
++}
++
+ static int
+ vhost_kernel_tap_set_offload(int fd, uint64_t features)
+ {
+diff --git a/drivers/net/virtio/virtio_user/vhost_kernel_tap.h b/drivers/net/virtio/virtio_user/vhost_kernel_tap.h
+deleted file mode 100644
+index e0e95b4f5..000000000
+--- a/drivers/net/virtio/virtio_user/vhost_kernel_tap.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/* SPDX-License-Identifier: BSD-3-Clause
+- * Copyright(c) 2016 Intel Corporation
+- */
+-
+-#include <sys/ioctl.h>
+-
+-/* TUN ioctls */
+-#define TUNSETIFF     _IOW('T', 202, int)
+-#define TUNGETFEATURES _IOR('T', 207, unsigned int)
+-#define TUNSETOFFLOAD  _IOW('T', 208, unsigned int)
+-#define TUNGETIFF      _IOR('T', 210, unsigned int)
+-#define TUNSETSNDBUF   _IOW('T', 212, int)
+-#define TUNGETVNETHDRSZ _IOR('T', 215, int)
+-#define TUNSETVNETHDRSZ _IOW('T', 216, int)
+-#define TUNSETQUEUE  _IOW('T', 217, int)
+-#define TUNSETVNETLE _IOW('T', 220, int)
+-#define TUNSETVNETBE _IOW('T', 222, int)
+-
+-/* TUNSETIFF ifr flags */
+-#define IFF_TAP          0x0002
+-#define IFF_NO_PI        0x1000
+-#define IFF_ONE_QUEUE    0x2000
+-#define IFF_VNET_HDR     0x4000
+-#define IFF_MULTI_QUEUE  0x0100
+-#define IFF_ATTACH_QUEUE 0x0200
+-#define IFF_DETACH_QUEUE 0x0400
+-
+-/* Features for GSO (TUNSETOFFLOAD). */
+-#define TUN_F_CSUM	0x01	/* You can hand me unchecksummed packets. */
+-#define TUN_F_TSO4	0x02	/* I can handle TSO for IPv4 packets */
+-#define TUN_F_TSO6	0x04	/* I can handle TSO for IPv6 packets */
+-#define TUN_F_TSO_ECN	0x08	/* I can handle TSO with ECN bits. */
+-#define TUN_F_UFO	0x10	/* I can handle UFO packets */
+-
+-/* Constants */
+-#define PATH_NET_TUN	"/dev/net/tun"
+-
+-int vhost_kernel_open_tap(char **p_ifname, int hdr_size, int req_mq,
+-			 const char *mac, uint64_t features);
+diff --git a/drivers/net/virtio/virtio_user/virtio_user_dev.c b/drivers/net/virtio/virtio_user/virtio_user_dev.c
+index 20816c936..853b65ca4 100644
+--- a/drivers/net/virtio/virtio_user/virtio_user_dev.c
++++ b/drivers/net/virtio/virtio_user/virtio_user_dev.c
+@@ -294,7 +294,7 @@ virtio_user_fill_intr_handle(struct virtio_user_dev *dev)
+ 	eth_dev->intr_handle->max_intr = dev->max_queue_pairs + 1;
+ 	eth_dev->intr_handle->type = RTE_INTR_HANDLE_VDEV;
+ 	/* For virtio vdev, no need to read counter for clean */
+-	eth_dev->intr_handle->efd_counter_size = 0;
++	eth_dev->intr_handle->efd_counter_size = 8;
+ 	eth_dev->intr_handle->fd = -1;
+ 	if (dev->vhostfd >= 0)
+ 		eth_dev->intr_handle->fd = dev->vhostfd;
+@@ -312,7 +312,9 @@ virtio_user_mem_event_cb(enum rte_mem_event type __rte_unused,
+ {
+ 	struct virtio_user_dev *dev = arg;
+ 	struct rte_memseg_list *msl;
++#if 0
+ 	uint16_t i;
++#endif
+ 
+ 	/* ignore externally allocated memory */
+ 	msl = rte_mem_virt2memseg_list(addr);
+@@ -325,15 +327,19 @@ virtio_user_mem_event_cb(enum rte_mem_event type __rte_unused,
+ 		goto exit;
+ 
+ 	/* Step 1: pause the active queues */
++#if 0
+ 	for (i = 0; i < dev->queue_pairs; i++)
+ 		dev->ops->enable_qp(dev, i, 0);
++#endif
+ 
+ 	/* Step 2: update memory regions */
+ 	dev->ops->send_request(dev, VHOST_USER_SET_MEM_TABLE, NULL);
+ 
+ 	/* Step 3: resume the active queues */
++#if 0
+ 	for (i = 0; i < dev->queue_pairs; i++)
+ 		dev->ops->enable_qp(dev, i, 1);
++#endif
+ 
+ exit:
+ 	pthread_mutex_unlock(&dev->mutex);
+@@ -401,6 +407,7 @@ virtio_user_dev_setup(struct virtio_user_dev *dev)
+ 	 1ULL << VIRTIO_NET_F_CSUM		|	\
+ 	 1ULL << VIRTIO_NET_F_HOST_TSO4		|	\
+ 	 1ULL << VIRTIO_NET_F_HOST_TSO6		|	\
++	 1ULL << VIRTIO_NET_F_HOST_UFO 		|	\
+ 	 1ULL << VIRTIO_NET_F_MRG_RXBUF		|	\
+ 	 1ULL << VIRTIO_RING_F_INDIRECT_DESC	|	\
+ 	 1ULL << VIRTIO_NET_F_GUEST_CSUM	|	\
+@@ -412,7 +419,7 @@ virtio_user_dev_setup(struct virtio_user_dev *dev)
+ int
+ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
+ 		     int cq, int queue_size, const char *mac, char **ifname,
+-		     int mrg_rxbuf, int in_order)
++		     int mrg_rxbuf, int in_order, int fd, int vhost_fd)
+ {
+ 	pthread_mutex_init(&dev->mutex, NULL);
+ 	snprintf(dev->path, PATH_MAX, "%s", path);
+@@ -420,6 +427,7 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
+ 	dev->max_queue_pairs = queues;
+ 	dev->queue_pairs = 1; /* mq disabled by default */
+ 	dev->queue_size = queue_size;
++	dev->vhost_fd = vhost_fd;
+ 	dev->mac_specified = 0;
+ 	dev->frontend_features = 0;
+ 	dev->unsupported_features = ~VIRTIO_USER_SUPPORTED_FEATURES;
+@@ -435,6 +443,12 @@ virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
+ 		return -1;
+ 	}
+ 
++	if (fd >= 0) {
++		dev->be_fd = fd;
++	} else {
++		dev->be_fd = -1;
++	}
++
+ 	if (!dev->is_server) {
+ 		if (dev->ops->send_request(dev, VHOST_USER_SET_OWNER,
+ 					   NULL) < 0) {
+diff --git a/drivers/net/virtio/virtio_user/virtio_user_dev.h b/drivers/net/virtio/virtio_user/virtio_user_dev.h
+index c42ce5d4b..e261fd6e3 100644
+--- a/drivers/net/virtio/virtio_user/virtio_user_dev.h
++++ b/drivers/net/virtio/virtio_user/virtio_user_dev.h
+@@ -21,6 +21,8 @@ struct virtio_user_dev {
+ 	char		*ifname;
+ 	int		*vhostfds;
+ 	int		*tapfds;
++	int		be_fd;
++	int		vhost_fd;
+ 
+ 	/* for both vhost_user and vhost_kernel */
+ 	int		callfds[VIRTIO_MAX_VIRTQUEUES];
+@@ -50,7 +52,7 @@ int virtio_user_start_device(struct virtio_user_dev *dev);
+ int virtio_user_stop_device(struct virtio_user_dev *dev);
+ int virtio_user_dev_init(struct virtio_user_dev *dev, char *path, int queues,
+ 			 int cq, int queue_size, const char *mac, char **ifname,
+-			 int mrg_rxbuf, int in_order);
++			 int mrg_rxbuf, int in_order, int fd, int vhost_fd);
+ void virtio_user_dev_uninit(struct virtio_user_dev *dev);
+ void virtio_user_handle_cq(struct virtio_user_dev *dev, uint16_t queue_idx);
+ uint8_t virtio_user_handle_mq(struct virtio_user_dev *dev, uint16_t q_pairs);
+diff --git a/drivers/net/virtio/virtio_user_ethdev.c b/drivers/net/virtio/virtio_user_ethdev.c
+index f8791391a..d98c6000d 100644
+--- a/drivers/net/virtio/virtio_user_ethdev.c
++++ b/drivers/net/virtio/virtio_user_ethdev.c
+@@ -221,8 +221,7 @@ virtio_user_get_features(struct virtio_hw *hw)
+ {
+ 	struct virtio_user_dev *dev = virtio_user_get_dev(hw);
+ 
+-	/* unmask feature bits defined in vhost user protocol */
+-	return dev->device_features & VIRTIO_PMD_SUPPORTED_GUEST_FEATURES;
++	return dev->device_features;
+ }
+ 
+ static void
+@@ -361,6 +360,10 @@ static const char *valid_args[] = {
+ 	VIRTIO_USER_ARG_MRG_RXBUF,
+ #define VIRTIO_USER_ARG_IN_ORDER       "in_order"
+ 	VIRTIO_USER_ARG_IN_ORDER,
++#define VIRTIO_USER_ARG_FD             "fd"
++	VIRTIO_USER_ARG_FD,
++#define VIRTIO_USER_ARG_VHOST_FD       "vhost_fd"
++	VIRTIO_USER_ARG_VHOST_FD,
+ 	NULL
+ };
+ 
+@@ -464,6 +467,8 @@ virtio_user_pmd_probe(struct rte_vdev_device *dev)
+ 	uint64_t server_mode = VIRTIO_USER_DEF_SERVER_MODE;
+ 	uint64_t mrg_rxbuf = 1;
+ 	uint64_t in_order = 1;
++	uint64_t fd = -1;
++	uint64_t vhost_fd = -1;
+ 	char *path = NULL;
+ 	char *ifname = NULL;
+ 	char *mac_addr = NULL;
+@@ -581,6 +586,24 @@ virtio_user_pmd_probe(struct rte_vdev_device *dev)
+ 		}
+ 	}
+ 
++	if (rte_kvargs_count(kvlist, VIRTIO_USER_ARG_FD) == 1) {
++		if (rte_kvargs_process(kvlist, VIRTIO_USER_ARG_FD,
++				       &get_integer_arg, &fd) < 0) {
++			PMD_INIT_LOG(ERR, "error to parse %s",
++				     VIRTIO_USER_ARG_FD);
++			goto end;
++		}
++	}
++
++	if (rte_kvargs_count(kvlist, VIRTIO_USER_ARG_VHOST_FD) == 1) {
++		if (rte_kvargs_process(kvlist, VIRTIO_USER_ARG_VHOST_FD,
++				       &get_integer_arg, &vhost_fd) < 0) {
++			PMD_INIT_LOG(ERR, "error to parse %s",
++				     VIRTIO_USER_ARG_VHOST_FD);
++			goto end;
++		}
++	}
++
+ 	if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+ 		struct virtio_user_dev *vu_dev;
+ 
+@@ -598,7 +621,7 @@ virtio_user_pmd_probe(struct rte_vdev_device *dev)
+ 			vu_dev->is_server = false;
+ 		if (virtio_user_dev_init(hw->virtio_user_dev, path, queues, cq,
+ 				 queue_size, mac_addr, &ifname, mrg_rxbuf,
+-				 in_order) < 0) {
++				 in_order, fd, vhost_fd) < 0) {
+ 			PMD_INIT_LOG(ERR, "virtio_user_dev_init fails");
+ 			virtio_user_eth_dev_free(eth_dev);
+ 			goto end;
+@@ -677,4 +700,6 @@ RTE_PMD_REGISTER_PARAM_STRING(net_virtio_user,
+ 	"iface=<string> "
+ 	"server=<0|1> "
+ 	"mrg_rxbuf=<0|1> "
+-	"in_order=<0|1>");
++	"in_order=<0|1> "
++	"fd=<int> "
++	"vhost_fd=<int>");
+diff --git a/lib/librte_eal/common/eal_common_memory.c b/lib/librte_eal/common/eal_common_memory.c
+index d47ea4938..065e6a304 100644
+--- a/lib/librte_eal/common/eal_common_memory.c
++++ b/lib/librte_eal/common/eal_common_memory.c
+@@ -52,7 +52,7 @@ static uint64_t system_page_sz;
+  * addressing limitations should call rte_mem_check_dma_mask for ensuring all
+  * memory is within supported range.
+  */
+-static uint64_t baseaddr = 0x100000000;
++static uint64_t baseaddr = 0xc000000000;
+ #endif
+
+ void *
+diff --git a/lib/librte_eal/common/eal_common_memzone.c b/lib/librte_eal/common/eal_common_memzone.c
+index b7081afbf..8ee30aeb2 100644
+--- a/lib/librte_eal/common/eal_common_memzone.c
++++ b/lib/librte_eal/common/eal_common_memzone.c
+@@ -128,7 +128,11 @@ memzone_reserve_aligned_thread_unsafe(const char *name, size_t len,
+ 	/* only set socket to SOCKET_ID_ANY if we aren't allocating for an
+ 	 * external heap.
+ 	 */
++#ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
+ 	if (!rte_eal_has_hugepages() && socket_id < RTE_MAX_NUMA_NODES)
++#else
++	if (rte_malloc_heap_socket_is_external(socket_id) != 1)
++#endif
+ 		socket_id = SOCKET_ID_ANY;
+ 
+ 	contig = (flags & RTE_MEMZONE_IOVA_CONTIG) != 0;
+diff --git a/lib/librte_eal/common/eal_common_options.c b/lib/librte_eal/common/eal_common_options.c
+index e31eca5c0..0118b3801 100644
+--- a/lib/librte_eal/common/eal_common_options.c
++++ b/lib/librte_eal/common/eal_common_options.c
+@@ -96,8 +96,10 @@ struct shared_driver {
+ static struct shared_driver_list solib_list =
+ TAILQ_HEAD_INITIALIZER(solib_list);
+ 
++#if 0
+ /* Default path of external loadable drivers */
+ static const char *default_solib_dir = RTE_EAL_PMD_PATH;
++#endif
+ 
+ /*
+  * Stringified version of solib path used by dpdk-pmdinfo.py
+@@ -229,6 +231,7 @@ eal_plugin_add(const char *path)
+ 	return 0;
+ }
+ 
++#if 0
+ static int
+ eal_plugindir_init(const char *path)
+ {
+@@ -263,10 +266,12 @@ eal_plugindir_init(const char *path)
+ 	/* XXX this ignores failures from readdir() itself */
+ 	return (dent == NULL) ? 0 : -1;
+ }
++#endif
+ 
+ int
+ eal_plugins_init(void)
+ {
++#if 0
+ 	struct shared_driver *solib = NULL;
+ 	struct stat sb;
+ 
+@@ -294,6 +299,7 @@ eal_plugins_init(void)
+ 		}
+ 
+ 	}
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/lib/librte_eal/common/eal_common_proc.c b/lib/librte_eal/common/eal_common_proc.c
+index 1c3f09aad..8b295e828 100644
+--- a/lib/librte_eal/common/eal_common_proc.c
++++ b/lib/librte_eal/common/eal_common_proc.c
+@@ -615,6 +615,7 @@ rte_mp_channel_init(void)
+ 		return -1;
+ 	}
+ 
++#if 0
+ 	if (rte_ctrl_thread_create(&mp_handle_tid, "rte_mp_handle",
+ 			NULL, mp_handle, NULL) < 0) {
+ 		RTE_LOG(ERR, EAL, "failed to create mp thead: %s\n",
+@@ -624,6 +625,10 @@ rte_mp_channel_init(void)
+ 		mp_fd = -1;
+ 		return -1;
+ 	}
++#else
++	RTE_SET_USED(mp_handle);
++	RTE_SET_USED(mp_handle_tid);
++#endif
+ 
+ 	/* unlock the directory */
+ 	flock(dir_fd, LOCK_UN);
+diff --git a/lib/librte_eal/common/include/arch/arm/rte_vect.h b/lib/librte_eal/common/include/arch/arm/rte_vect.h
+index 2a18a6854..ec88659b0 100644
+--- a/lib/librte_eal/common/include/arch/arm/rte_vect.h
++++ b/lib/librte_eal/common/include/arch/arm/rte_vect.h
+@@ -15,6 +15,7 @@ extern "C" {
+ #endif
+ 
+ typedef int32x4_t xmm_t;
++typedef int64x2_t __m128i;
+ 
+ #define	XMM_SIZE	(sizeof(xmm_t))
+ #define	XMM_MASK	(XMM_SIZE - 1)
+@@ -28,6 +29,10 @@ typedef union rte_xmm {
+ 	double   pd[XMM_SIZE / sizeof(double)];
+ } __attribute__((aligned(16))) rte_xmm_t;
+ 
++#define vreinterpretq_m128i_s32(x) vreinterpretq_s64_s32(x)
++#define vreinterpretq_s8_m128i(x) vreinterpretq_s8_s64(x)
++#define vreinterpretq_u8_m128i(x) vreinterpretq_u8_s64(x)
++
+ #ifdef RTE_ARCH_ARM
+ /* NEON intrinsic vqtbl1q_u8() is not supported in ARMv7-A(AArch32) */
+ static __inline uint8x16_t
+@@ -62,6 +67,63 @@ vaddvq_u16(uint16x8_t a)
+ 
+ #endif
+ 
++static inline __m128i _mm_set_epi8(signed char b15,
++                                  signed char b14,
++                                  signed char b13,
++                                  signed char b12,
++                                  signed char b11,
++                                  signed char b10,
++                                  signed char b9,
++                                  signed char b8,
++                                  signed char b7,
++                                  signed char b6,
++                                  signed char b5,
++                                  signed char b4,
++                                  signed char b3,
++                                  signed char b2,
++                                  signed char b1,
++                                  signed char b0)
++{
++    int8_t __attribute__((aligned(16)))
++	    data[16] = {(int8_t) b0, (int8_t) b1,  (int8_t) b2,  (int8_t) b3,
++                    (int8_t) b4,  (int8_t) b5,  (int8_t) b6,  (int8_t) b7,
++                    (int8_t) b8,  (int8_t) b9,  (int8_t) b10, (int8_t) b11,
++                    (int8_t) b12, (int8_t) b13, (int8_t) b14, (int8_t) b15};
++
++    return (__m128i) vld1q_s8(data);
++}
++
++static inline __m128i _mm_loadu_si128(const __m128i *p)
++{
++	return vreinterpretq_m128i_s32(vld1q_s32((const int32_t *) p));
++}
++
++static inline __m128i _mm_shuffle_epi8(__m128i a, __m128i b)
++{
++    int8x16_t tbl = vreinterpretq_s8_m128i(a);
++    uint8x16_t idx = vreinterpretq_u8_m128i(b);
++    uint8x16_t idx_masked = vandq_u8(idx, vdupq_n_u8(0x8F));
++
++#if defined(__aarch64__)
++    return vreinterpretq_s64_s8(vqtbl1q_s8(tbl, idx_masked));
++#elif defined(__GNUC__)
++    int8x16_t ret;
++
++    __asm__ __volatile__(
++        "vtbl.8  %e[ret], {%e[tbl], %f[tbl]}, %e[idx]\n"
++        "vtbl.8  %f[ret], {%e[tbl], %f[tbl]}, %f[idx]\n"
++        : [ret] "=&w"(ret)
++        : [tbl] "w"(tbl), [idx] "w"(idx_masked));
++    return vreinterpretq_s64_s8(ret);
++#else
++    // use this line if testing on aarch64
++    int8x8x2_t a_split = {vget_low_s8(tbl), vget_high_s8(tbl)};
++    return vreinterpretq_s64_s8(
++        vcombine_s8(vtbl2_s8(a_split, vget_low_u8(idx_masked)),
++                    vtbl2_s8(a_split, vget_high_u8(idx_masked))));
++#endif
++}
++
+ #if defined(RTE_TOOLCHAIN_GCC) && (GCC_VERSION < 70000)
+ static inline uint32x4_t
+ vcopyq_laneq_u32(uint32x4_t a, const int lane_a,
+diff --git a/lib/librte_eal/common/include/rte_bus.h b/lib/librte_eal/common/include/rte_bus.h
+index 6be4b5cab..3165883d5 100644
+--- a/lib/librte_eal/common/include/rte_bus.h
++++ b/lib/librte_eal/common/include/rte_bus.h
+@@ -70,6 +70,20 @@ enum rte_iova_mode {
+ 	RTE_IOVA_VA = (1 << 1)  /* DMA using virtual address */
+ };
+ 
++/*
++ * 1. We encounter the error at kvm emulated intel iommu which needs 39 bit
++ *    address:
++ *
++ *  "EAL: eal_legacy_hugepage_init(): couldnt allocate memory
++ *   due to IOVA exceeding limits of current DMA mask."
++ *
++ * 2. Virtio PCI devices need iova <= 16TB. But in iova mode, we could have
++ *    a va larger than it, resulting in error like:
++ *
++ *  "check_vq_phys_addr_ok(): vring address shouldn't be above 16TB!"
++ */
++#define RTE_IOVA_MASK ((1ULL << 39) - 1)
++
+ /**
+  * Bus specific scan for devices attached on the bus.
+  * For each bus object, the scan would be responsible for finding devices and
+diff --git a/lib/librte_eal/common/include/rte_common.h b/lib/librte_eal/common/include/rte_common.h
+index 66cdf60b2..edbee8f1b 100644
+--- a/lib/librte_eal/common/include/rte_common.h
++++ b/lib/librte_eal/common/include/rte_common.h
+@@ -89,7 +89,7 @@ typedef uint16_t unaligned_uint16_t;
+ #define RTE_PRIORITY_LOG 101
+ #define RTE_PRIORITY_BUS 110
+ #define RTE_PRIORITY_CLASS 120
+-#define RTE_PRIORITY_LAST 65535
++#define RTE_PRIORITY_LAST 130
+ 
+ #define RTE_PRIO(prio) \
+ 	RTE_PRIORITY_ ## prio
+diff --git a/lib/librte_eal/common/malloc_heap.c b/lib/librte_eal/common/malloc_heap.c
+index c6a6d4f6b..3aca81092 100644
+--- a/lib/librte_eal/common/malloc_heap.c
++++ b/lib/librte_eal/common/malloc_heap.c
+@@ -1155,7 +1155,7 @@ malloc_heap_add_external_memory(struct malloc_heap *heap, void *va_addr,
+ 	msl->external = 1;
+ 
+ 	/* erase contents of new memory */
+-	memset(va_addr, 0, seg_len);
++//	memset(va_addr, 0, seg_len);
+ 
+ 	/* now, add newly minted memory to the malloc heap */
+ 	malloc_heap_add_memory(heap, msl, va_addr, seg_len);
+@@ -1167,8 +1167,8 @@ malloc_heap_add_external_memory(struct malloc_heap *heap, void *va_addr,
+ 			heap->name, va_addr);
+ 
+ 	/* notify all subscribers that a new memory area has been added */
+-	eal_memalloc_mem_event_notify(RTE_MEM_EVENT_ALLOC,
+-			va_addr, seg_len);
++//	eal_memalloc_mem_event_notify(RTE_MEM_EVENT_ALLOC,
++//			va_addr, seg_len);
+ 
+ 	return 0;
+ }
+diff --git a/lib/librte_eal/common/malloc_mp.c b/lib/librte_eal/common/malloc_mp.c
+index 5f2d4e0be..6bee48bb4 100644
+--- a/lib/librte_eal/common/malloc_mp.c
++++ b/lib/librte_eal/common/malloc_mp.c
+@@ -14,6 +14,8 @@
+ #include "malloc_elem.h"
+ #include "malloc_mp.h"
+ 
++#if 0
++
+ #define MP_ACTION_SYNC "mp_malloc_sync"
+ /**< request sent by primary process to notify of changes in memory map */
+ #define MP_ACTION_ROLLBACK "mp_malloc_rollback"
+@@ -739,3 +741,24 @@ register_mp_requests(void)
+ 	}
+ 	return 0;
+ }
++
++#else
++int
++request_sync(void)
++{
++	return 0;
++}
++
++int
++request_to_primary(struct malloc_mp_req *user_req)
++{
++	RTE_SET_USED(user_req);
++	return 0;
++}
++
++int
++register_mp_requests(void)
++{
++	return 0;
++}
++#endif
+diff --git a/lib/librte_eal/common/rte_malloc.c b/lib/librte_eal/common/rte_malloc.c
+index 0da5ad5e8..b236e7f88 100644
+--- a/lib/librte_eal/common/rte_malloc.c
++++ b/lib/librte_eal/common/rte_malloc.c
+@@ -46,6 +46,7 @@ rte_malloc_socket(const char *type, size_t size, unsigned int align,
+ 	if (size == 0 || (align && !rte_is_power_of_2(align)))
+ 		return NULL;
+ 
++#ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
+ 	/* if there are no hugepages and if we are not allocating from an
+ 	 * external heap, use memory from any socket available. checking for
+ 	 * socket being external may return -1 in case of invalid socket, but
+@@ -53,6 +54,13 @@ rte_malloc_socket(const char *type, size_t size, unsigned int align,
+ 	 */
+ 	if (rte_malloc_heap_socket_is_external(socket_arg) != 1 &&
+ 				!rte_eal_has_hugepages())
++#else
++	/* if dpdk is not even aware of numa and we are not allocating from an
++	 * external heap, it doesn't matter from which socket memory is
++	 * allocated.
++	 */
++	if (rte_malloc_heap_socket_is_external(socket_arg) != 1)
++#endif
+ 		socket_arg = SOCKET_ID_ANY;
+ 
+ 	return malloc_heap_alloc(type, size, socket_arg, 0,
+@@ -307,7 +315,7 @@ rte_malloc_virt2iova(const void *addr)
+ 		return RTE_BAD_IOVA;
+ 
+ 	if (!elem->msl->external && rte_eal_iova_mode() == RTE_IOVA_VA)
+-		return (uintptr_t) addr;
++		return (uintptr_t) addr & RTE_IOVA_MASK;
+ 
+ 	ms = rte_mem_virt2memseg(addr, elem->msl);
+ 	if (ms == NULL)
+diff --git a/lib/librte_eal/common/rte_option.c b/lib/librte_eal/common/rte_option.c
+index 02d59a869..eefb8b923 100644
+--- a/lib/librte_eal/common/rte_option.c
++++ b/lib/librte_eal/common/rte_option.c
+@@ -35,10 +35,11 @@ void __rte_experimental
+ rte_option_register(struct rte_option *opt)
+ {
+ 	TAILQ_FOREACH(option, &rte_option_list, next) {
+-		if (strcmp(opt->opt_str, option->opt_str) == 0)
++		if (strcmp(opt->opt_str, option->opt_str) == 0) {
+ 			RTE_LOG(INFO, EAL, "Option %s has already been registered.",
+ 					opt->opt_str);
+ 			return;
++		}
+ 	}
+ 
+ 	TAILQ_INSERT_HEAD(&rte_option_list, opt, next);
+diff --git a/lib/librte_eal/linuxapp/eal/eal.c b/lib/librte_eal/linuxapp/eal/eal.c
+index 361744d40..edd3694c9 100644
+--- a/lib/librte_eal/linuxapp/eal/eal.c
++++ b/lib/librte_eal/linuxapp/eal/eal.c
+@@ -107,13 +107,13 @@ eal_create_runtime_dir(void)
+ 	char tmp[PATH_MAX];
+ 	int ret;
+ 
+-	if (getuid() != 0) {
++	//if (getuid() != 0) {
+ 		/* try XDG path first, fall back to /tmp */
+ 		if (xdg_runtime_dir != NULL)
+ 			directory = xdg_runtime_dir;
+ 		else
+ 			directory = fallback;
+-	}
++	//}
+ 	/* create DPDK subdirectory under runtime dir */
+ 	ret = snprintf(tmp, sizeof(tmp), "%s/dpdk", directory);
+ 	if (ret < 0 || ret == sizeof(tmp)) {
+@@ -797,10 +797,10 @@ rte_eal_mcfg_complete(void)
+ int
+ rte_eal_iopl_init(void)
+ {
+-#if defined(RTE_ARCH_X86)
+-	if (iopl(3) != 0)
+-		return -1;
+-#endif
++//#if defined(RTE_ARCH_X86)
++//	if (iopl(3) != 0)
++//		return -1;
++//#endif
+ 	return 0;
+ }
+ 
+@@ -891,6 +891,7 @@ rte_eal_init(int argc, char **argv)
+ 	/* Put mp channel init before bus scan so that we can init the vdev
+ 	 * bus through mp channel in the secondary process before the bus scan.
+ 	 */
++#if 0
+ 	if (rte_mp_channel_init() < 0) {
+ 		rte_eal_init_alert("failed to init mp channel");
+ 		if (rte_eal_process_type() == RTE_PROC_PRIMARY) {
+@@ -898,6 +899,7 @@ rte_eal_init(int argc, char **argv)
+ 			return -1;
+ 		}
+ 	}
++#endif
+ 
+ 	/* register multi-process action callbacks for hotplug */
+ 	if (rte_mp_dev_hotplug_init() < 0) {
+@@ -962,15 +964,17 @@ rte_eal_init(int argc, char **argv)
+ 
+ 	rte_srand(rte_rdtsc());
+ 
++#if 0
+ 	if (rte_eal_log_init(logid, internal_config.syslog_facility) < 0) {
+ 		rte_eal_init_alert("Cannot init logging.");
+ 		rte_errno = ENOMEM;
+ 		rte_atomic32_clear(&run_once);
+ 		return -1;
+ 	}
++#endif
+ 
+ #ifdef VFIO_PRESENT
+-	if (rte_eal_vfio_setup() < 0) {
++	if (rte_eal_has_pci() && rte_eal_vfio_setup() < 0) {
+ 		rte_eal_init_alert("Cannot init VFIO");
+ 		rte_errno = EAGAIN;
+ 		rte_atomic32_clear(&run_once);
+@@ -1022,6 +1026,7 @@ rte_eal_init(int argc, char **argv)
+ 
+ 	eal_check_mem_on_local_socket();
+ 
++#if 0
+ 	eal_thread_init_master(rte_config.master_lcore);
+ 
+ 	ret = eal_thread_dump_affinity(cpuset, sizeof(cpuset));
+@@ -1073,6 +1078,14 @@ rte_eal_init(int argc, char **argv)
+ 		rte_errno = ENOEXEC;
+ 		return -1;
+ 	}
++#else
++	RTE_PER_LCORE(_lcore_id) = rte_config.master_lcore;
++	RTE_SET_USED(thread_name);
++	RTE_SET_USED(cpuset);
++	RTE_SET_USED(thread_id);
++	RTE_SET_USED(i);
++	RTE_SET_USED(sync_func(NULL));
++#endif
+ 
+ 	/* Probe all the buses and devices/drivers on them */
+ 	if (rte_bus_probe()) {
+@@ -1087,6 +1100,7 @@ rte_eal_init(int argc, char **argv)
+ 		return -1;
+ #endif
+ 
++#if 0
+ 	/* initialize default service/lcore mappings and start running. Ignore
+ 	 * -ENOTSUP, as it indicates no service coremask passed to EAL.
+ 	 */
+@@ -1095,6 +1109,7 @@ rte_eal_init(int argc, char **argv)
+ 		rte_errno = ENOEXEC;
+ 		return -1;
+ 	}
++#endif
+ 
+ 	rte_eal_mcfg_complete();
+ 
+@@ -1129,7 +1144,9 @@ rte_eal_cleanup(void)
+ 	 */
+ 	if (rte_eal_process_type() == RTE_PROC_PRIMARY)
+ 		rte_memseg_walk(mark_freeable, NULL);
++#if 0
+ 	rte_service_finalize();
++#endif
+ 	return 0;
+ }
+ 
+diff --git a/lib/librte_eal/linuxapp/eal/eal_alarm.c b/lib/librte_eal/linuxapp/eal/eal_alarm.c
+index 840ede780..3b7755c35 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_alarm.c
++++ b/lib/librte_eal/linuxapp/eal/eal_alarm.c
+@@ -20,8 +20,11 @@
+ #include <rte_lcore.h>
+ #include <rte_errno.h>
+ #include <rte_spinlock.h>
++#include <rte_debug.h>
+ #include <eal_private.h>
+ 
++#if 0
++
+ #ifndef	TFD_NONBLOCK
+ #include <fcntl.h>
+ #define	TFD_NONBLOCK	O_NONBLOCK
+@@ -241,3 +244,30 @@ rte_eal_alarm_cancel(rte_eal_alarm_callback cb_fn, void *cb_arg)
+ 
+ 	return count;
+ }
++#else
++
++int
++rte_eal_alarm_init(void)
++{
++	return 0;
++}
++
++int
++rte_eal_alarm_set(uint64_t us, rte_eal_alarm_callback cb_fn, void *cb_arg)
++{
++	RTE_SET_USED(us);
++	RTE_SET_USED(cb_fn);
++	RTE_SET_USED(cb_arg);
++	rte_panic("alarm is disabled\n");
++	return 0;
++}
++
++int
++rte_eal_alarm_cancel(rte_eal_alarm_callback cb_fn, void *cb_arg)
++{
++	RTE_SET_USED(cb_fn);
++	RTE_SET_USED(cb_arg);
++	rte_panic("alarm is disabled\n");
++	return 0;
++}
++#endif
+diff --git a/lib/librte_eal/linuxapp/eal/eal_hugepage_info.c b/lib/librte_eal/linuxapp/eal/eal_hugepage_info.c
+index 0eab1cf71..3e1e4f136 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_hugepage_info.c
++++ b/lib/librte_eal/linuxapp/eal/eal_hugepage_info.c
+@@ -362,6 +362,25 @@ hugepage_info_init(void)
+ 	DIR *dir;
+ 	struct dirent *dirent;
+ 
++	if (internal_config.in_memory) {
++		struct hugepage_info *hpi;
++
++		RTE_LOG(INFO, EAL, "In-memory mode enabled, only use "
++			"2MB-hugepages which will be allocated anonymously"
++			", 1GB per socket\n");
++
++		hpi = &internal_config.hugepage_info[0];
++		hpi->hugepage_sz = 2 * 1024 * 1024;
++
++		for (i = 0; i < rte_socket_count(); i++) {
++			int socket = rte_socket_id_by_idx(i);
++			hpi->num_pages[socket] =
++				1024 * 1024 * 1024 / hpi->hugepage_sz;
++		}
++		num_sizes = 1;
++		goto check;
++	}
++
+ 	dir = opendir(sys_dir_path);
+ 	if (dir == NULL) {
+ 		RTE_LOG(ERR, EAL,
+@@ -438,11 +457,14 @@ hugepage_info_init(void)
+ 	if (dirent != NULL)
+ 		return -1;
+ 
++check:
++
+ 	internal_config.num_hugepage_sizes = num_sizes;
+ 
+ 	/* sort the page directory entries by size, largest to smallest */
+-	qsort(&internal_config.hugepage_info[0], num_sizes,
+-	      sizeof(internal_config.hugepage_info[0]), compare_hpi);
++	if (num_sizes > 1)
++		qsort(&internal_config.hugepage_info[0], num_sizes,
++		      sizeof(internal_config.hugepage_info[0]), compare_hpi);
+ 
+ 	/* now we have all info, check we have at least one valid size */
+ 	for (i = 0; i < num_sizes; i++) {
+diff --git a/lib/librte_eal/linuxapp/eal/eal_interrupts.c b/lib/librte_eal/linuxapp/eal/eal_interrupts.c
+index cbac451e1..c9096c2e3 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_interrupts.c
++++ b/lib/librte_eal/linuxapp/eal/eal_interrupts.c
+@@ -850,8 +850,8 @@ eal_intr_handle_interrupts(int pfd, unsigned totalfds)
+ 	int nfds = 0;
+ 
+ 	for(;;) {
+-		nfds = epoll_wait(pfd, events, totalfds,
+-			EAL_INTR_EPOLL_WAIT_FOREVER);
++		nfds = epoll_pwait(pfd, events, totalfds,
++			EAL_INTR_EPOLL_WAIT_FOREVER, NULL);
+ 		/* epoll_wait fail */
+ 		if (nfds < 0) {
+ 			if (errno == EINTR)
+@@ -896,7 +896,7 @@ eal_intr_thread_main(__rte_unused void *arg)
+ 		unsigned numfds = 0;
+ 
+ 		/* create epoll fd */
+-		int pfd = epoll_create(1);
++		int pfd = epoll_create1(0);
+ 		if (pfd < 0)
+ 			rte_panic("Cannot create epoll instance\n");
+ 
+@@ -961,6 +961,8 @@ rte_eal_intr_init(void)
+ 		return -1;
+ 	}
+ 
++	return 0;
++
+ 	/* create the host thread to wait/handle the interrupt */
+ 	ret = rte_ctrl_thread_create(&intr_thread, "eal-intr-thread", NULL,
+ 			eal_intr_thread_main, NULL);
+@@ -1057,7 +1059,7 @@ eal_epoll_process_event(struct epoll_event *evs, unsigned int n,
+ static inline int
+ eal_init_tls_epfd(void)
+ {
+-	int pfd = epoll_create(255);
++	int pfd = epoll_create1(0);
+ 
+ 	if (pfd < 0) {
+ 		RTE_LOG(ERR, EAL,
+@@ -1093,7 +1095,7 @@ rte_epoll_wait(int epfd, struct rte_epoll_event *events,
+ 		epfd = rte_intr_tls_epfd();
+ 
+ 	while (1) {
+-		rc = epoll_wait(epfd, evs, maxevents, timeout);
++		rc = epoll_pwait(epfd, evs, maxevents, timeout, NULL);
+ 		if (likely(rc > 0)) {
+ 			/* epoll_wait has at least one fd ready to read */
+ 			rc = eal_epoll_process_event(evs, rc, events);
+diff --git a/lib/librte_eal/linuxapp/eal/eal_memalloc.c b/lib/librte_eal/linuxapp/eal/eal_memalloc.c
+index 784939566..81b963989 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_memalloc.c
++++ b/lib/librte_eal/linuxapp/eal/eal_memalloc.c
+@@ -43,6 +43,8 @@
+ #include "eal_memalloc.h"
+ #include "eal_private.h"
+ 
++int rte_oom = 0;
++
+ const int anonymous_hugepages_supported =
+ #ifdef MAP_HUGE_SHIFT
+ 		1;
+@@ -52,6 +54,7 @@ const int anonymous_hugepages_supported =
+ #define RTE_MAP_HUGE_SHIFT 26
+ #endif
+ 
++#ifndef SHARED_HUGE
+ /*
+  * we don't actually care if memfd itself is supported - we only need to check
+  * if memfd supports hugetlbfs, as that already implies memfd support.
+@@ -61,6 +64,7 @@ const int anonymous_hugepages_supported =
+  * and/or memfd with hugetlbfs, so we need to be able to adjust this flag at
+  * runtime, and fall back to anonymous memory.
+  */
++#undef MFD_HUGETLB
+ static int memfd_create_supported =
+ #ifdef MFD_HUGETLB
+ #define MEMFD_SUPPORTED
+@@ -73,7 +77,9 @@ static int memfd_create_supported =
+  * not all kernel version support fallocate on hugetlbfs, so fall back to
+  * ftruncate and disallow deallocation if fallocate is not supported.
+  */
+-static int fallocate_supported = -1; /* unknown */
++static int fallocate_supported = 0; /* closed */
++
++#endif
+ 
+ /*
+  * we have two modes - single file segments, and file-per-page mode.
+@@ -106,6 +112,9 @@ static struct {
+ /** local copy of a memory map, used to synchronize memory hotplug in MP */
+ static struct rte_memseg_list local_memsegs[RTE_MAX_MEMSEG_LISTS];
+ 
++rte_spinlock_t memlock;
++
++#ifndef SHARED_HUGE
+ static sigjmp_buf huge_jmpenv;
+ 
+ static void __rte_unused huge_sigbus_handler(int signo __rte_unused)
+@@ -148,6 +157,7 @@ huge_recover_sigbus(void)
+ 		huge_need_recover = 0;
+ 	}
+ }
++#endif
+ 
+ #ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
+ static bool
+@@ -196,6 +206,7 @@ restore_numa(int *oldpolicy, struct bitmask *oldmask)
+ }
+ #endif
+ 
++#ifndef SHARED_HUGE
+ /*
+  * uses fstat to report the size of a file on disk
+  */
+@@ -636,8 +647,13 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
+ 		int pagesz_flag, flags;
+ 
+ 		pagesz_flag = pagesz_flags(alloc_sz);
++#if 0
+ 		flags = pagesz_flag | MAP_HUGETLB | MAP_FIXED |
+ 				MAP_PRIVATE | MAP_ANONYMOUS;
++#else
++		RTE_SET_USED(pagesz_flag);
++		flags = MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS;
++#endif
+ 		fd = -1;
+ 		mmap_flags = flags;
+ 
+@@ -701,6 +717,8 @@ alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
+ 		goto resized;
+ 	}
+ 
++	madvise(addr, alloc_sz, MADV_HUGEPAGE);
++
+ 	/* In linux, hugetlb limitations, like cgroup, are
+ 	 * enforced at fault time instead of mmap(), even
+ 	 * with the option of MAP_POPULATE. Kernel will send
+@@ -793,9 +811,6 @@ free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
+ 	int fd, ret = 0;
+ 	bool exit_early;
+ 
+-	/* erase page data */
+-	memset(ms->addr, 0, ms->len);
+-
+ 	if (mmap(ms->addr, ms->len, PROT_READ,
+ 			MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) ==
+ 				MAP_FAILED) {
+@@ -854,6 +869,66 @@ free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
+ 	return ret < 0 ? -1 : 0;
+ }
+ 
++#else
++
++static int
++alloc_seg(struct rte_memseg *ms, void *addr, int socket_id,
++		struct hugepage_info *hi, unsigned int list_idx,
++		unsigned int seg_idx)
++{
++	rte_iova_t iova;
++	size_t alloc_sz;
++	void *mapped_addr;
++
++	RTE_SET_USED(list_idx);
++	RTE_SET_USED(seg_idx);
++
++	alloc_sz = hi->hugepage_sz;
++	mapped_addr = mmap(addr, alloc_sz,
++			   PROT_READ | PROT_WRITE,
++			   MAP_SHARED | MAP_ANONYMOUS | MAP_FIXED,
++			   -1, 0);
++	if (mapped_addr == MAP_FAILED) {
++		RTE_LOG(ERR, EAL, "%s(): mmap() failed: %s\n", __func__,
++			strerror(errno));
++		return -1;
++	}
++	if (addr != mapped_addr) {
++		RTE_LOG(ERR, EAL, "%s(): wrong mmap() address\n", __func__);
++		return -1;
++	}
++
++	madvise(addr, alloc_sz, MADV_HUGEPAGE);
++
++	iova = rte_mem_virt2iova(addr);
++	ms->addr = addr;
++	ms->hugepage_sz = alloc_sz;
++	ms->len = alloc_sz;
++	ms->nchannel = rte_memory_get_nchannel();
++	ms->nrank = rte_memory_get_nrank();
++	ms->iova = iova;
++	ms->socket_id = socket_id;
++	return 0;
++}
++
++static int
++free_seg(struct rte_memseg *ms, struct hugepage_info *hi,
++		unsigned int list_idx, unsigned int seg_idx)
++{
++	RTE_SET_USED(hi);
++	RTE_SET_USED(list_idx);
++	RTE_SET_USED(seg_idx);
++	if (mmap(ms->addr, ms->len, PROT_READ,
++		 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == MAP_FAILED) {
++		RTE_LOG(ERR, EAL, "%s(): mmap() failed: %s\n", __func__,
++			strerror(errno));
++		return -1;
++	}
++	memset(ms, 0, sizeof(*ms));
++	return 0;
++}
++#endif
++
+ struct alloc_walk_param {
+ 	struct hugepage_info *hi;
+ 	struct rte_memseg **ms;
+@@ -870,7 +945,7 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
+ 	struct alloc_walk_param *wa = arg;
+ 	struct rte_memseg_list *cur_msl;
+ 	size_t page_sz;
+-	int cur_idx, start_idx, j, dir_fd = -1;
++	int cur_idx, start_idx, j, locked = -1;
+ 	unsigned int msl_idx, need, i;
+ 
+ 	if (msl->page_sz != wa->page_sz)
+@@ -900,19 +975,8 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
+ 	 * another one.
+ 	 */
+ 	if (wa->hi->lock_descriptor == -1 && !internal_config.in_memory) {
+-		dir_fd = open(wa->hi->hugedir, O_RDONLY);
+-		if (dir_fd < 0) {
+-			RTE_LOG(ERR, EAL, "%s(): Cannot open '%s': %s\n",
+-				__func__, wa->hi->hugedir, strerror(errno));
+-			return -1;
+-		}
+-		/* blocking writelock */
+-		if (flock(dir_fd, LOCK_EX)) {
+-			RTE_LOG(ERR, EAL, "%s(): Cannot lock '%s': %s\n",
+-				__func__, wa->hi->hugedir, strerror(errno));
+-			close(dir_fd);
+-			return -1;
+-		}
++		locked = 1;
++		rte_spinlock_lock(&memlock);
+ 	}
+ 
+ 	for (i = 0; i < need; i++, cur_idx++) {
+@@ -951,8 +1015,8 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
+ 			if (wa->ms)
+ 				memset(wa->ms, 0, sizeof(*wa->ms) * wa->n_segs);
+ 
+-			if (dir_fd >= 0)
+-				close(dir_fd);
++			if (locked)
++				rte_spinlock_unlock(&memlock);
+ 			return -1;
+ 		}
+ 		if (wa->ms)
+@@ -964,8 +1028,8 @@ alloc_seg_walk(const struct rte_memseg_list *msl, void *arg)
+ 	wa->segs_allocated = i;
+ 	if (i > 0)
+ 		cur_msl->version++;
+-	if (dir_fd >= 0)
+-		close(dir_fd);
++	if (locked)
++		rte_spinlock_unlock(&memlock);
+ 	return 1;
+ }
+ 
+@@ -1087,6 +1151,10 @@ eal_memalloc_alloc_seg_bulk(struct rte_memseg **ms, int n_segs, size_t page_sz,
+ 	if (ret == 0) {
+ 		RTE_LOG(ERR, EAL, "%s(): couldn't find suitable memseg_list\n",
+ 			__func__);
++		if (rte_oom == 0) {
++			rte_dump_stack();
++			rte_oom = 1;
++		}
+ 		ret = -1;
+ 	} else if (ret > 0) {
+ 		ret = (int)wa.segs_allocated;
+@@ -1611,6 +1679,7 @@ eal_memalloc_get_seg_fd_offset(int list_idx, int seg_idx, size_t *offset)
+ int
+ eal_memalloc_init(void)
+ {
++	rte_spinlock_init(&memlock);
+ 	if (rte_eal_process_type() == RTE_PROC_SECONDARY)
+ 		if (rte_memseg_list_walk(secondary_msl_create_walk, NULL) < 0)
+ 			return -1;
+diff --git a/lib/librte_eal/linuxapp/eal/eal_memory.c b/lib/librte_eal/linuxapp/eal/eal_memory.c
+index 32feb415d..08a4db62b 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_memory.c
++++ b/lib/librte_eal/linuxapp/eal/eal_memory.c
+@@ -154,7 +154,7 @@ rte_iova_t
+ rte_mem_virt2iova(const void *virtaddr)
+ {
+ 	if (rte_eal_iova_mode() == RTE_IOVA_VA)
+-		return (uintptr_t)virtaddr;
++		return (uintptr_t)virtaddr & RTE_IOVA_MASK;
+ 	return rte_mem_virt2phy(virtaddr);
+ }
+ 
+@@ -1266,10 +1266,10 @@ eal_get_hugepage_mem_size(void)
+ 	unsigned i, j;
+ 
+ 	for (i = 0; i < internal_config.num_hugepage_sizes; i++) {
+-		struct hugepage_info *hpi = &internal_config.hugepage_info[i];
+-		if (strnlen(hpi->hugedir, sizeof(hpi->hugedir)) != 0) {
++		struct hugepage_info hpi = internal_config.hugepage_info[i];
++		if (strnlen(hpi.hugedir, sizeof(hpi.hugedir)) != 0) {
+ 			for (j = 0; j < RTE_MAX_NUMA_NODES; j++) {
+-				size += hpi->hugepage_sz * hpi->num_pages[j];
++				size += hpi.hugepage_sz * hpi.num_pages[j];
+ 			}
+ 		}
+ 	}
+@@ -1377,7 +1377,7 @@ eal_legacy_hugepage_init(void)
+ 
+ 			ms = rte_fbarray_get(arr, cur_seg);
+ 			if (rte_eal_iova_mode() == RTE_IOVA_VA)
+-				ms->iova = (uintptr_t)addr;
++				ms->iova = (uintptr_t)addr & RTE_IOVA_MASK;
+ 			else
+ 				ms->iova = RTE_BAD_IOVA;
+ 			ms->addr = addr;
+@@ -2360,6 +2360,7 @@ memseg_secondary_init(void)
+ int
+ rte_eal_memseg_init(void)
+ {
++#if 0
+ 	/* increase rlimit to maximum */
+ 	struct rlimit lim;
+ 
+@@ -2378,6 +2379,7 @@ rte_eal_memseg_init(void)
+ 	} else {
+ 		RTE_LOG(ERR, EAL, "Cannot get current resource limits\n");
+ 	}
++#endif
+ 
+ 	return rte_eal_process_type() == RTE_PROC_PRIMARY ?
+ #ifndef RTE_ARCH_64
+diff --git a/lib/librte_eal/linuxapp/eal/eal_thread.c b/lib/librte_eal/linuxapp/eal/eal_thread.c
+index 379773b68..b67295d10 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_thread.c
++++ b/lib/librte_eal/linuxapp/eal/eal_thread.c
+@@ -83,9 +83,11 @@ void eal_thread_init_master(unsigned lcore_id)
+ 	/* set the lcore ID in per-lcore memory area */
+ 	RTE_PER_LCORE(_lcore_id) = lcore_id;
+ 
++#if 0
+ 	/* set CPU affinity */
+ 	if (eal_thread_set_affinity() < 0)
+ 		rte_panic("cannot set affinity\n");
++#endif
+ }
+ 
+ /* main loop of threads */
+diff --git a/lib/librte_eal/linuxapp/eal/eal_vfio.c b/lib/librte_eal/linuxapp/eal/eal_vfio.c
+index 0516b1597..e78fe6f52 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_vfio.c
++++ b/lib/librte_eal/linuxapp/eal/eal_vfio.c
+@@ -383,9 +383,11 @@ vfio_get_group_fd(struct vfio_config *vfio_cfg,
+ 		return -1;
+ 	}
+ 
+-	cur_grp->group_num = iommu_group_num;
+-	cur_grp->fd = vfio_group_fd;
+-	vfio_cfg->vfio_active_groups++;
++	if (vfio_group_fd > 0) {
++		cur_grp->group_num = iommu_group_num;
++		cur_grp->fd = vfio_group_fd;
++		vfio_cfg->vfio_active_groups++;
++	}
+ 
+ 	return vfio_group_fd;
+ }
+diff --git a/lib/librte_ip_frag/rte_ipv6_reassembly.c b/lib/librte_ip_frag/rte_ipv6_reassembly.c
+index 855e3f740..b336b54f0 100644
+--- a/lib/librte_ip_frag/rte_ipv6_reassembly.c
++++ b/lib/librte_ip_frag/rte_ipv6_reassembly.c
+@@ -104,14 +104,17 @@ ipv6_frag_reassemble(struct ip_frag_pkt *fp)
+ 	 * other headers, so we assume there are no other headers and thus update
+ 	 * the main IPv6 header instead.
+ 	 */
+-	move_len = m->l2_len + m->l3_len - sizeof(*frag_hdr);
+-	frag_hdr = (struct ipv6_extension_fragment *) (ip_hdr + 1);
++	move_len = m->l2_len + sizeof(*ip_hdr);
++	frag_hdr = rte_pktmbuf_mtod_offset(m, struct ipv6_extension_fragment*,
++			m->l2_len + m->l3_len - sizeof(*frag_hdr));
++
+ 	ip_hdr->proto = frag_hdr->next_header;
+ 
+-	ip_frag_memmove(rte_pktmbuf_mtod_offset(m, char *, sizeof(*frag_hdr)),
++	ip_frag_memmove(rte_pktmbuf_mtod_offset(m, char *,
++			m->l3_len - sizeof(*ip_hdr)),
+ 			rte_pktmbuf_mtod(m, char*), move_len);
+ 
+-	rte_pktmbuf_adj(m, sizeof(*frag_hdr));
++	rte_pktmbuf_adj(m, m->l3_len - sizeof(*ip_hdr));
+ 
+ 	return m;
+ }
+diff --git a/lib/librte_mbuf/rte_mbuf.c b/lib/librte_mbuf/rte_mbuf.c
+index 9790b4fb1..c9c43ee72 100644
+--- a/lib/librte_mbuf/rte_mbuf.c
++++ b/lib/librte_mbuf/rte_mbuf.c
+@@ -167,6 +167,57 @@ rte_pktmbuf_pool_create(const char *name, unsigned int n,
+ 			data_room_size, socket_id, NULL);
+ }
+ 
++struct rte_mempool *
++rte_pktmbuf_dynamic_pool_create(const char *name, unsigned int n,
++	unsigned int cache_size, uint16_t priv_size,
++	uint16_t data_room_size, int socket_id, uint32_t dynamic_size)
++{
++	struct rte_mempool *mp;
++	struct rte_pktmbuf_pool_private mbp_priv;
++	const char *mp_ops_name;
++	unsigned elt_size;
++	int ret;
++
++	if (RTE_ALIGN(priv_size, RTE_MBUF_PRIV_ALIGN) != priv_size) {
++		RTE_LOG(ERR, MBUF, "mbuf priv_size=%u is not aligned\n",
++			priv_size);
++		rte_errno = EINVAL;
++		return NULL;
++	}
++	elt_size = sizeof(struct rte_mbuf) + (unsigned)priv_size +
++		(unsigned)data_room_size;
++	mbp_priv.mbuf_data_room_size = data_room_size;
++	mbp_priv.mbuf_priv_size = priv_size;
++
++	mp = rte_mempool_create_empty(name, n, elt_size, cache_size,
++		 sizeof(struct rte_pktmbuf_pool_private),
++		 socket_id, MEMPOOL_F_DYNAMIC);
++	if (mp == NULL)
++		return NULL;
++
++	mp_ops_name = rte_mbuf_best_mempool_ops();
++	ret = rte_mempool_set_ops_byname(mp, mp_ops_name, NULL);
++	if (ret != 0) {
++		RTE_LOG(ERR, MBUF, "error setting mempool handler\n");
++		rte_mempool_free(mp);
++		rte_errno = -ret;
++		return NULL;
++	}
++	rte_pktmbuf_pool_init(mp, &mbp_priv);
++
++	rte_mempool_set_dynamic_size(mp, dynamic_size);
++	rte_mempool_set_dynamic_cb(mp, rte_pktmbuf_init);
++
++	ret = rte_mempool_populate_default(mp);
++	if (ret < 0) {
++		rte_mempool_free(mp);
++		rte_errno = -ret;
++		return NULL;
++	}
++
++	return mp;
++}
++
+ /* do some sanity checks on a mbuf: panic if it fails */
+ void
+ rte_mbuf_sanity_check(const struct rte_mbuf *m, int is_header)
+diff --git a/lib/librte_mbuf/rte_mbuf.h b/lib/librte_mbuf/rte_mbuf.h
+index 3dbc6695e..fdf66dfa2 100644
+--- a/lib/librte_mbuf/rte_mbuf.h
++++ b/lib/librte_mbuf/rte_mbuf.h
+@@ -657,6 +657,8 @@ struct rte_mbuf {
+ 	 */
+ 	struct rte_mbuf_ext_shared_info *shinfo;
+ 
++	struct rte_mbuf *next_pkt;
++
+ } __rte_cache_aligned;
+ 
+ /**
+@@ -1183,6 +1185,11 @@ rte_pktmbuf_pool_create(const char *name, unsigned n,
+ 	unsigned cache_size, uint16_t priv_size, uint16_t data_room_size,
+ 	int socket_id);
+ 
++struct rte_mempool *
++rte_pktmbuf_dynamic_pool_create(const char *name, unsigned int n,
++	unsigned int cache_size, uint16_t priv_size,
++	uint16_t data_room_size, int socket_id, uint32_t dynamic_size);
++
+ /**
+  * Create a mbuf pool with a given mempool ops name
+  *
+@@ -1293,6 +1300,7 @@ static inline void rte_pktmbuf_reset_headroom(struct rte_mbuf *m)
+ static inline void rte_pktmbuf_reset(struct rte_mbuf *m)
+ {
+ 	m->next = NULL;
++	m->next_pkt = NULL;
+ 	m->pkt_len = 0;
+ 	m->tx_offload = 0;
+ 	m->vlan_tci = 0;
+diff --git a/lib/librte_mbuf/rte_mbuf_version.map b/lib/librte_mbuf/rte_mbuf_version.map
+index cae68db8d..d6d25af95 100644
+--- a/lib/librte_mbuf/rte_mbuf_version.map
++++ b/lib/librte_mbuf/rte_mbuf_version.map
+@@ -44,4 +44,10 @@ DPDK_18.08 {
+ 	rte_mbuf_set_user_mempool_ops;
+ 	rte_mbuf_user_mempool_ops;
+ 	rte_pktmbuf_pool_create_by_ops;
+-} DPDK_16.11;
++} DPDK_18.11;
++
++DPDK_18.11 {
++	global:
++
++	rte_pktmbuf_dynamic_pool_create;
++} DPDK_18.12;
+diff --git a/lib/librte_mempool/rte_mempool.c b/lib/librte_mempool/rte_mempool.c
+index 683b216f9..b374f405b 100644
+--- a/lib/librte_mempool/rte_mempool.c
++++ b/lib/librte_mempool/rte_mempool.c
+@@ -141,7 +141,7 @@ get_min_page_size(int socket_id)
+ 
+ 
+ static void
+-mempool_add_elem(struct rte_mempool *mp, __rte_unused void *opaque,
++mempool_add_elem(struct rte_mempool *mp, void *mc,
+ 		 void *obj, rte_iova_t iova)
+ {
+ 	struct rte_mempool_objhdr *hdr;
+@@ -150,8 +150,11 @@ mempool_add_elem(struct rte_mempool *mp, __rte_unused void *opaque,
+ 	/* set mempool ptr in header */
+ 	hdr = RTE_PTR_SUB(obj, sizeof(*hdr));
+ 	hdr->mp = mp;
++	hdr->mc = mc;
+ 	hdr->iova = iova;
+-	STAILQ_INSERT_TAIL(&mp->elt_list, hdr, next);
++	TAILQ_INSERT_TAIL(&mp->elt_list, hdr, next);
++	if (mp->flags & MEMPOOL_F_DYNAMIC && mp->dyn_obj_cb)
++		mp->dyn_obj_cb(mp, NULL, obj, mp->populated_size);
+ 	mp->populated_size++;
+ 
+ #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
+@@ -170,7 +173,7 @@ rte_mempool_obj_iter(struct rte_mempool *mp,
+ 	void *obj;
+ 	unsigned n = 0;
+ 
+-	STAILQ_FOREACH(hdr, &mp->elt_list, next) {
++	TAILQ_FOREACH(hdr, &mp->elt_list, next) {
+ 		obj = (char *)hdr + sizeof(*hdr);
+ 		obj_cb(mp, obj_cb_arg, obj, n);
+ 		n++;
+@@ -187,7 +190,7 @@ rte_mempool_mem_iter(struct rte_mempool *mp,
+ 	struct rte_mempool_memhdr *hdr;
+ 	unsigned n = 0;
+ 
+-	STAILQ_FOREACH(hdr, &mp->mem_list, next) {
++	TAILQ_FOREACH(hdr, &mp->mem_list, next) {
+ 		mem_cb(mp, mem_cb_arg, hdr, n);
+ 		n++;
+ 	}
+@@ -260,16 +263,16 @@ rte_mempool_free_memchunks(struct rte_mempool *mp)
+ 	struct rte_mempool_memhdr *memhdr;
+ 	void *elt;
+ 
+-	while (!STAILQ_EMPTY(&mp->elt_list)) {
++	while (!TAILQ_EMPTY(&mp->elt_list)) {
+ 		rte_mempool_ops_dequeue_bulk(mp, &elt, 1);
+ 		(void)elt;
+-		STAILQ_REMOVE_HEAD(&mp->elt_list, next);
+ 		mp->populated_size--;
+ 	}
++	TAILQ_INIT(&mp->elt_list);
+ 
+-	while (!STAILQ_EMPTY(&mp->mem_list)) {
+-		memhdr = STAILQ_FIRST(&mp->mem_list);
+-		STAILQ_REMOVE_HEAD(&mp->mem_list, next);
++	while (!TAILQ_EMPTY(&mp->mem_list)) {
++		memhdr = TAILQ_FIRST(&mp->mem_list);
++		TAILQ_REMOVE(&mp->mem_list, memhdr, next);
+ 		if (memhdr->free_cb != NULL)
+ 			memhdr->free_cb(memhdr, memhdr->opaque);
+ 		rte_free(memhdr);
+@@ -277,6 +280,81 @@ rte_mempool_free_memchunks(struct rte_mempool *mp)
+ 	}
+ }
+ 
++static inline struct rte_mempool_objhdr *
++get_first_of_mem_chunk(struct rte_mempool *mp, struct rte_mempool_memhdr *hdr)
++{
++	size_t off;
++	char *vaddr = (char *)hdr->addr;
++
++	if (mp->flags & MEMPOOL_F_NO_CACHE_ALIGN)
++		off = RTE_PTR_ALIGN_CEIL(vaddr, 8) - vaddr;
++	else
++		off = RTE_PTR_ALIGN_CEIL(vaddr, RTE_CACHE_LINE_SIZE) - vaddr;
++	vaddr += off;
++
++	vaddr += mp->header_size;
++	vaddr = RTE_PTR_SUB(vaddr, sizeof(struct rte_mempool_objhdr));
++
++	return (struct rte_mempool_objhdr *)vaddr;
++}
++
++static inline struct rte_mempool_objhdr *
++get_last_of_mem_chunk(struct rte_mempool *mp, struct rte_mempool_memhdr *hdr)
++{
++	size_t off;
++	char *vaddr = (char *)hdr->addr;
++	size_t total_elt_sz;
++
++	if (mp->flags & MEMPOOL_F_NO_CACHE_ALIGN)
++		off = RTE_PTR_ALIGN_CEIL(vaddr, 8) - vaddr;
++	else
++		off = RTE_PTR_ALIGN_CEIL(vaddr, RTE_CACHE_LINE_SIZE) - vaddr;
++	vaddr += off;
++
++       	total_elt_sz = mp->header_size + mp->elt_size + mp->trailer_size;
++	vaddr += total_elt_sz * (hdr->total - 1);
++
++	vaddr += mp->header_size;
++	vaddr = RTE_PTR_SUB(vaddr, sizeof(struct rte_mempool_objhdr));
++
++	return (struct rte_mempool_objhdr *)vaddr;
++}
++
++void
++rte_mempool_recycle_memchunks(struct rte_mempool *mp)
++{
++	struct rte_mempool_memhdr *hdr, *tmp;
++	struct rte_mempool_objhdr *obj_1, *obj_n;
++
++	hdr = TAILQ_FIRST(&mp->mem_list);
++	while (hdr) {
++		if (hdr->total != hdr->free) {
++			hdr = TAILQ_NEXT(hdr, next);
++			continue;
++		}
++
++		/* Remove obj */
++		obj_1 = get_first_of_mem_chunk(mp, hdr);
++		obj_n = get_last_of_mem_chunk(mp, hdr);
++		if (((obj_n)->next.tqe_next) != NULL)
++			(obj_n)->next.tqe_next->next.tqe_prev =
++				(obj_1)->next.tqe_prev;
++		else
++			(&mp->elt_list)->tqh_last = (obj_1)->next.tqe_prev;
++		*(obj_1)->next.tqe_prev = (obj_n)->next.tqe_next;
++		mp->populated_size -= hdr->total;
++
++		/* Remove chunk */
++		tmp = TAILQ_NEXT(hdr, next);
++		TAILQ_REMOVE(&mp->mem_list, hdr, next);
++		mp->nb_mem_chunks--;
++		if (hdr->free_cb != NULL)
++			hdr->free_cb(hdr, hdr->opaque);
++		rte_free(hdr);
++		hdr = tmp;
++	}
++}
++
+ static int
+ mempool_ops_alloc_once(struct rte_mempool *mp)
+ {
+@@ -338,7 +416,7 @@ rte_mempool_populate_iova(struct rte_mempool *mp, char *vaddr,
+ 	i = rte_mempool_ops_populate(mp, mp->size - mp->populated_size,
+ 		(char *)vaddr + off,
+ 		(iova == RTE_BAD_IOVA) ? RTE_BAD_IOVA : (iova + off),
+-		len - off, mempool_add_elem, NULL);
++		len - off, mempool_add_elem, memhdr);
+ 
+ 	/* not enough room to store one object */
+ 	if (i == 0) {
+@@ -346,8 +424,9 @@ rte_mempool_populate_iova(struct rte_mempool *mp, char *vaddr,
+ 		goto fail;
+ 	}
+ 
+-	STAILQ_INSERT_TAIL(&mp->mem_list, memhdr, next);
++	TAILQ_INSERT_TAIL(&mp->mem_list, memhdr, next);
+ 	mp->nb_mem_chunks++;
++	memhdr->total = i;
+ 	return i;
+ 
+ fail:
+@@ -426,9 +505,10 @@ rte_mempool_populate_default(struct rte_mempool *mp)
+ 	ssize_t mem_size;
+ 	size_t align, pg_sz, pg_shift;
+ 	rte_iova_t iova;
+-	unsigned mz_id, n;
++	unsigned mz_id, n, avail;
+ 	int ret;
+ 	bool no_contig, try_contig, no_pageshift, external;
++	bool dynamic = (mp->flags & MEMPOOL_F_DYNAMIC) ? true : false;
+ 
+ 	ret = mempool_ops_alloc_once(mp);
+ 	if (ret != 0)
+@@ -436,12 +516,14 @@ rte_mempool_populate_default(struct rte_mempool *mp)
+ 
+ 	/* check if we can retrieve a valid socket ID */
+ 	ret = rte_malloc_heap_socket_is_external(mp->socket_id);
++#ifdef RTE_EAL_NUMA_AWARE_HUGEPAGES
+ 	if (ret < 0)
+ 		return -EINVAL;
+-	external = ret;
++#endif
++	external = (ret == 1);
+ 
+ 	/* mempool must not be populated */
+-	if (mp->nb_mem_chunks != 0)
++	if (mp->nb_mem_chunks != 0 && !dynamic)
+ 		return -EEXIST;
+ 
+ 	no_contig = mp->flags & MEMPOOL_F_NO_IOVA_CONTIG;
+@@ -512,7 +594,16 @@ rte_mempool_populate_default(struct rte_mempool *mp)
+ 		pg_shift = rte_bsf32(pg_sz);
+ 	}
+ 
+-	for (mz_id = 0, n = mp->size; n > 0; mz_id++, n -= ret) {
++	n = mp->size;
++	if (dynamic) {
++		n = RTE_MIN(mp->size - mp->populated_size, mp->dynamic_size);
++		if (mp->nb_mem_chunks != 0 && rte_mempool_ops_alloc(mp) != 0)
++			return -ENOMEM;
++	}
++
++	avail = 0;
++	mz_id = mp->nb_mem_chunks;
++	for (; n > 0; mz_id++, n -= ret, avail += ret) {
+ 		size_t min_chunk_size;
+ 		unsigned int flags;
+ 
+@@ -607,9 +698,16 @@ rte_mempool_populate_default(struct rte_mempool *mp)
+ 		}
+ 	}
+ 
+-	return mp->size;
++	return avail;
+ 
+  fail:
++	if (dynamic) {
++		if (avail)
++			return avail;
++
++		return ret;
++	}
++
+ 	rte_mempool_free_memchunks(mp);
+ 	return ret;
+ }
+@@ -659,7 +757,7 @@ rte_mempool_populate_anon(struct rte_mempool *mp)
+ 	char *addr;
+ 
+ 	/* mempool is already populated, error */
+-	if ((!STAILQ_EMPTY(&mp->mem_list)) || mp->nb_mem_chunks != 0) {
++	if ((!TAILQ_EMPTY(&mp->mem_list)) || mp->nb_mem_chunks != 0) {
+ 		rte_errno = EINVAL;
+ 		return 0;
+ 	}
+@@ -879,8 +977,8 @@ rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
+ 	/* Size of default caches, zero means disabled. */
+ 	mp->cache_size = cache_size;
+ 	mp->private_data_size = private_data_size;
+-	STAILQ_INIT(&mp->elt_list);
+-	STAILQ_INIT(&mp->mem_list);
++	TAILQ_INIT(&mp->elt_list);
++	TAILQ_INIT(&mp->mem_list);
+ 
+ 	/*
+ 	 * local_cache pointer is set even if cache_size is zero.
+@@ -1193,6 +1291,8 @@ rte_mempool_dump(FILE *f, struct rte_mempool *mp)
+ 	unsigned common_count;
+ 	unsigned cache_count;
+ 	size_t mem_len = 0;
++	uint32_t actual_total = 0;
++	uint32_t actual_free = 0;
+ 
+ 	RTE_ASSERT(f != NULL);
+ 	RTE_ASSERT(mp != NULL);
+@@ -1212,13 +1312,20 @@ rte_mempool_dump(FILE *f, struct rte_mempool *mp)
+ 
+ 	fprintf(f, "  private_data_size=%"PRIu32"\n", mp->private_data_size);
+ 
+-	STAILQ_FOREACH(memhdr, &mp->mem_list, next)
++	TAILQ_FOREACH(memhdr, &mp->mem_list, next) {
+ 		mem_len += memhdr->len;
++		actual_total += memhdr->total;
++		actual_free += memhdr->free;
++	}
+ 	if (mem_len != 0) {
+ 		fprintf(f, "  avg bytes/object=%#Lf\n",
+-			(long double)mem_len / mp->size);
++			(long double)mem_len / mp->populated_size);
+ 	}
+ 
++	fprintf(f, "  actual_total=%"PRIu32"\n", actual_total);
++	fprintf(f, "  actual_free=%"PRIu32"\n", actual_free);
++	fprintf(f, "  free_count=%"PRIu32"\n", rte_mempool_avail_count(mp));
++
+ 	cache_count = rte_mempool_dump_cache(f, mp);
+ 	common_count = rte_mempool_ops_get_count(mp);
+ 	if ((cache_count + common_count) > mp->size)
+diff --git a/lib/librte_mempool/rte_mempool.h b/lib/librte_mempool/rte_mempool.h
+index 7c9cd9a2f..c2b47455d 100644
+--- a/lib/librte_mempool/rte_mempool.h
++++ b/lib/librte_mempool/rte_mempool.h
+@@ -130,9 +130,11 @@ struct rte_mempool_objsz {
+  * a cookie is also added in this structure preventing corruptions and
+  * double-frees.
+  */
++struct rte_mempool_memhdr;
+ struct rte_mempool_objhdr {
+-	STAILQ_ENTRY(rte_mempool_objhdr) next; /**< Next in list. */
++	TAILQ_ENTRY(rte_mempool_objhdr) next; /**< Next in list. */
+ 	struct rte_mempool *mp;          /**< The mempool owning the object. */
++	struct rte_mempool_memhdr *mc;   /**< The memory chunk owning the object. */
+ 	RTE_STD_C11
+ 	union {
+ 		rte_iova_t iova;         /**< IO address of the object. */
+@@ -146,7 +148,7 @@ struct rte_mempool_objhdr {
+ /**
+  * A list of object headers type
+  */
+-STAILQ_HEAD(rte_mempool_objhdr_list, rte_mempool_objhdr);
++TAILQ_HEAD(rte_mempool_objhdr_list, rte_mempool_objhdr);
+ 
+ #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
+ 
+@@ -165,7 +167,7 @@ struct rte_mempool_objtlr {
+ /**
+  * A list of memory where objects are stored
+  */
+-STAILQ_HEAD(rte_mempool_memhdr_list, rte_mempool_memhdr);
++TAILQ_HEAD(rte_mempool_memhdr_list, rte_mempool_memhdr);
+ 
+ /**
+  * Callback used to free a memory chunk
+@@ -180,7 +182,7 @@ typedef void (rte_mempool_memchunk_free_cb_t)(struct rte_mempool_memhdr *memhdr,
+  * and physically contiguous.
+  */
+ struct rte_mempool_memhdr {
+-	STAILQ_ENTRY(rte_mempool_memhdr) next; /**< Next in list. */
++	TAILQ_ENTRY(rte_mempool_memhdr) next; /**< Next in list. */
+ 	struct rte_mempool *mp;  /**< The mempool owning the chunk */
+ 	void *addr;              /**< Virtual address of the chunk */
+ 	RTE_STD_C11
+@@ -189,6 +191,8 @@ struct rte_mempool_memhdr {
+ 		phys_addr_t phys_addr; /**< Physical address of the chunk */
+ 	};
+ 	size_t len;              /**< length of the chunk */
++	uint32_t total;
++	uint32_t free;
+ 	rte_mempool_memchunk_free_cb_t *free_cb; /**< Free callback */
+ 	void *opaque;            /**< Argument passed to the free callback */
+ };
+@@ -207,6 +211,16 @@ struct rte_mempool_info {
+ 	unsigned int contig_block_size;
+ } __rte_cache_aligned;
+ 
++struct rte_mempool;
++/**
++ * An object callback function for mempool.
++ *
++ * Used by rte_mempool_create() and rte_mempool_obj_iter().
++ */
++typedef void (rte_mempool_obj_cb_t)(struct rte_mempool *mp,
++		void *opaque, void *obj, unsigned obj_idx);
++typedef rte_mempool_obj_cb_t rte_mempool_obj_ctor_t; /* compat */
++
+ /**
+  * The RTE mempool structure.
+  */
+@@ -247,6 +261,8 @@ struct rte_mempool {
+ 	struct rte_mempool_cache *local_cache; /**< Per-lcore local cache */
+ 
+ 	uint32_t populated_size;         /**< Number of populated objects. */
++	uint32_t dynamic_size;           /**< Number of dynamic populated objects. */
++	rte_mempool_obj_cb_t *dyn_obj_cb; /**< elem cb for dynamic populated objects. */
+ 	struct rte_mempool_objhdr_list elt_list; /**< List of objects in pool */
+ 	uint32_t nb_mem_chunks;          /**< Number of memory chunks */
+ 	struct rte_mempool_memhdr_list mem_list; /**< List of memory chunks */
+@@ -264,6 +280,9 @@ struct rte_mempool {
+ #define MEMPOOL_F_POOL_CREATED   0x0010 /**< Internal: pool is created. */
+ #define MEMPOOL_F_NO_IOVA_CONTIG 0x0020 /**< Don't need IOVA contiguous objs. */
+ #define MEMPOOL_F_NO_PHYS_CONTIG MEMPOOL_F_NO_IOVA_CONTIG /* deprecated */
++#define MEMPOOL_F_DYNAMIC        0x0040 /**< Populate objs dynamically */
++#define MEMPOOL_F_DYNAMIC_SHRINK 0x0080 /**< Recycle memory chunks when necessary */
++#define MEMPOOL_F_DYNAMIC_NOW    0x0100 /**< It's dynamically expanding or shrinking now */
+ 
+ /**
+  * @internal When debug is enabled, store some statistics.
+@@ -437,6 +456,11 @@ typedef int (*rte_mempool_dequeue_contig_blocks_t)(struct rte_mempool *mp,
+  */
+ typedef unsigned (*rte_mempool_get_count)(const struct rte_mempool *mp);
+ 
++/**
++ * Return the number of elements which can be recycled.
++ */
++typedef unsigned (*rte_mempool_pre_recycle)(struct rte_mempool *mp);
++
+ /**
+  * Calculate memory size required to store given number of objects.
+  *
+@@ -562,6 +586,7 @@ struct rte_mempool_ops {
+ 	rte_mempool_enqueue_t enqueue;   /**< Enqueue an object. */
+ 	rte_mempool_dequeue_t dequeue;   /**< Dequeue an object. */
+ 	rte_mempool_get_count get_count; /**< Get qty of available objs. */
++	rte_mempool_pre_recycle pre_recycle; /**< Get qty of available objs for recycle. */
+ 	/**
+ 	 * Optional callback to calculate memory size required to
+ 	 * store specified number of objects.
+@@ -651,10 +676,20 @@ static inline int
+ rte_mempool_ops_dequeue_bulk(struct rte_mempool *mp,
+ 		void **obj_table, unsigned n)
+ {
++	int i, ret;
+ 	struct rte_mempool_ops *ops;
++	struct rte_mempool_objhdr *hdr;
+ 
+ 	ops = rte_mempool_get_ops(mp->ops_index);
+-	return ops->dequeue(mp, obj_table, n);
++	ret = ops->dequeue(mp, obj_table, n);
++
++	for (i = 0; i < ret; ++i, obj_table++) {
++		hdr = (struct rte_mempool_objhdr *)RTE_PTR_SUB(*obj_table,
++		       sizeof(*hdr));
++		hdr->mc->free--;
++	}
++
++	return ret;
+ }
+ 
+ /**
+@@ -681,6 +716,18 @@ rte_mempool_ops_dequeue_contig_blocks(struct rte_mempool *mp,
+ 	return ops->dequeue_contig_blocks(mp, first_obj_table, n);
+ }
+ 
++/**
++  * @warning
++ * @b EXPERIMENTAL: this API may change without prior notice.
++ *
++ * Recycle memory chunks of a mempool
++ *
++ * @param mp
++ *   A pointer to the mempool structure.
++ */
++void
++rte_mempool_recycle_memchunks(struct rte_mempool *mp);
++
+ /**
+  * @internal wrapper for mempool_ops enqueue callback.
+  *
+@@ -698,10 +745,49 @@ static inline int
+ rte_mempool_ops_enqueue_bulk(struct rte_mempool *mp, void * const *obj_table,
+ 		unsigned n)
+ {
++	int i, ret;
+ 	struct rte_mempool_ops *ops;
++	struct rte_mempool_objhdr *hdr;
+ 
+ 	ops = rte_mempool_get_ops(mp->ops_index);
+-	return ops->enqueue(mp, obj_table, n);
++	ret = ops->enqueue(mp, obj_table, n);
++
++	for (i = 0; i < ret; ++i, obj_table++) {
++		hdr = (struct rte_mempool_objhdr *)RTE_PTR_SUB(*obj_table,
++		       sizeof(*hdr));
++		hdr->mc->free++;
++	}
++
++	/* recycle conditions:
++	 * 1) nb_mem_chunks >= 8
++	 * 2) free rate >= 0.75
++	 */
++	if (unlikely((mp->flags & MEMPOOL_F_DYNAMIC_SHRINK) &&
++		     (mp->nb_mem_chunks >= 8) &&
++		     ((ops->get_count(mp) << 2) >= 3 * mp->populated_size))) {
++
++		if (rte_atomic32_cmpset(&mp->flags,
++					mp->flags & ~MEMPOOL_F_DYNAMIC_NOW,
++					mp->flags | MEMPOOL_F_DYNAMIC_NOW)) {
++			/* For debug:
++			 * rte_mempool_dump(stdout, mp);
++			 */
++
++			if (ops->pre_recycle(mp))
++				rte_mempool_recycle_memchunks(mp);
++
++			/* For debug:
++			 * printf("\n\n\n after recycle \n\n\n");
++			 * rte_mempool_dump(stdout, mp);
++			 */
++
++			mp->flags &= ~MEMPOOL_F_DYNAMIC_NOW;
++
++			/* TODO: add stats for debug */
++		}
++	}
++
++	return ret;
+ }
+ 
+ /**
+@@ -833,21 +919,12 @@ int rte_mempool_register_ops(const struct rte_mempool_ops *ops);
+  * more than RTE_MEMPOOL_MAX_OPS_IDX is registered.
+  */
+ #define MEMPOOL_REGISTER_OPS(ops)					\
+-	void mp_hdlr_init_##ops(void);					\
+-	void __attribute__((constructor, used)) mp_hdlr_init_##ops(void)\
++	static void __attribute__((constructor(101), used))		\
++	mp_hdlr_init_##ops(void)					\
+ 	{								\
+-		rte_mempool_register_ops(&ops);			\
++		rte_mempool_register_ops(&ops);				\
+ 	}
+ 
+-/**
+- * An object callback function for mempool.
+- *
+- * Used by rte_mempool_create() and rte_mempool_obj_iter().
+- */
+-typedef void (rte_mempool_obj_cb_t)(struct rte_mempool *mp,
+-		void *opaque, void *obj, unsigned obj_idx);
+-typedef rte_mempool_obj_cb_t rte_mempool_obj_ctor_t; /* compat */
+-
+ /**
+  * A memory callback function for mempool.
+  *
+@@ -989,6 +1066,22 @@ struct rte_mempool *
+ rte_mempool_create_empty(const char *name, unsigned n, unsigned elt_size,
+ 	unsigned cache_size, unsigned private_data_size,
+ 	int socket_id, unsigned flags);
++
++static inline void
++rte_mempool_set_dynamic_size(struct rte_mempool *mp, int dynamic_size)
++{
++	mp->flags |= MEMPOOL_F_DYNAMIC;
++	mp->dynamic_size = dynamic_size;
++}
++
++static inline void
++rte_mempool_set_dynamic_cb(struct rte_mempool *mp,
++			   rte_mempool_obj_cb_t *dyn_obj_cb)
++{
++	mp->flags |= MEMPOOL_F_DYNAMIC;
++	mp->dyn_obj_cb = dyn_obj_cb;
++}
++
+ /**
+  * Free a mempool
+  *
+@@ -1390,9 +1483,28 @@ __mempool_generic_get(struct rte_mempool *mp, void **obj_table,
+ 	/* get remaining objects from ring */
+ 	ret = rte_mempool_ops_dequeue_bulk(mp, obj_table, n);
+ 
+-	if (ret < 0)
++	if (ret < 0) {
++		if (mp->flags & MEMPOOL_F_DYNAMIC &&
++		    mp->populated_size < mp->size) {
++			int work;
++
++			work = rte_atomic32_cmpset(&mp->flags,
++				      mp->flags & ~MEMPOOL_F_DYNAMIC_NOW,
++				      mp->flags | MEMPOOL_F_DYNAMIC_NOW);
++			if (work) {
++				int more;
++
++				more = rte_mempool_populate_default(mp);
++				mp->flags &= ~MEMPOOL_F_DYNAMIC_NOW;
++				if (more > 0)
++					goto ring_dequeue;
++			} else {
++				/* mempool is populating, try again */
++				goto ring_dequeue;
++			}
++		}
+ 		__MEMPOOL_STAT_ADD(mp, get_fail, n);
+-	else
++	} else
+ 		__MEMPOOL_STAT_ADD(mp, get_success, n);
+ 
+ 	return ret;
+@@ -1455,6 +1567,8 @@ static __rte_always_inline int
+ rte_mempool_get_bulk(struct rte_mempool *mp, void **obj_table, unsigned int n)
+ {
+ 	struct rte_mempool_cache *cache;
++	if (n == 0)
++		return 0;
+ 	cache = rte_mempool_default_cache(mp, rte_lcore_id());
+ 	return rte_mempool_generic_get(mp, obj_table, n, cache);
+ }
+diff --git a/lib/librte_mempool/rte_mempool_ops.c b/lib/librte_mempool/rte_mempool_ops.c
+index a27e1fa51..573f426ca 100644
+--- a/lib/librte_mempool/rte_mempool_ops.c
++++ b/lib/librte_mempool/rte_mempool_ops.c
+@@ -57,6 +57,7 @@ rte_mempool_register_ops(const struct rte_mempool_ops *h)
+ 	ops->enqueue = h->enqueue;
+ 	ops->dequeue = h->dequeue;
+ 	ops->get_count = h->get_count;
++	ops->pre_recycle = h->pre_recycle;
+ 	ops->calc_mem_size = h->calc_mem_size;
+ 	ops->populate = h->populate;
+ 	ops->get_info = h->get_info;
+diff --git a/lib/librte_mempool/rte_mempool_version.map b/lib/librte_mempool/rte_mempool_version.map
+index 17cbca460..4120124cd 100644
+--- a/lib/librte_mempool/rte_mempool_version.map
++++ b/lib/librte_mempool/rte_mempool_version.map
+@@ -53,6 +53,13 @@ DPDK_18.05 {
+ 
+ } DPDK_17.11;
+ 
++DPDK_18.11 {
++	global:
++
++	rte_mempool_recycle_memchunks;
++
++} DPDK_18.05;
++
+ EXPERIMENTAL {
+ 	global:
+ 
+diff --git a/mk/rte.cpuflags.mk b/mk/rte.cpuflags.mk
+index c3291b17a..f04a7d84a 100644
+--- a/mk/rte.cpuflags.mk
++++ b/mk/rte.cpuflags.mk
+@@ -33,10 +33,6 @@ ifneq ($(filter $(AUTO_CPUFLAGS),__SSE4_2__),)
+ CPUFLAGS += SSE4_2
+ endif
+ 
+-ifneq ($(filter $(AUTO_CPUFLAGS),__AES__),)
+-CPUFLAGS += AES
+-endif
+-
+ ifneq ($(filter $(AUTO_CPUFLAGS),__PCLMUL__),)
+ CPUFLAGS += PCLMULQDQ
+ endif
+-- 
+2.19.1.6.gb485710b
+

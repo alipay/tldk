@@ -24,9 +24,13 @@ DPDK_DEBUG            ?= n
 DPDK_DESTDIR          ?= $(CURDIR)/install
 PACKETDRILL           ?= n
 
+
+LPM := n
+PCAP := n
+
 B := $(DPDK_BUILD_DIR)
 I := $(DPDK_INSTALL_DIR)
-DPDK_GIT_REPO ?= http://dpdk.org/git/dpdk -b v18.11
+DPDK_GIT_REPO ?= http://dpdk.org/git/dpdk
 DPDK_SOURCE := $(B)/dpdk
 
 ifneq (,$(findstring clang,$(CC)))
@@ -108,7 +112,7 @@ $(B)/custom-config: $(B)/.patch.ok Makefile
 	$(call set,RTE_BUILD_COMBINE_LIBS,n)
 	$(call set,RTE_LIBRTE_I40E_16BYTE_RX_DESC,y)
 	$(call set,RTE_LIBRTE_I40E_ITR_INTERVAL,16)
-	$(call set,RTE_LIBRTE_PMD_PCAP,y)
+	$(call set,RTE_LIBRTE_PMD_PCAP,n)
 	@# enable debug init for device drivers
 	$(call set,RTE_LIBRTE_I40E_DEBUG_INIT,$(DPDK_DEBUG))
 	$(call set,RTE_LIBRTE_IXGBE_DEBUG_INIT,$(DPDK_DEBUG))
@@ -220,7 +224,7 @@ $(B)/.download.ok:
 	@if [ -e $(DPDK_SOURCE) ] ; \
 		then rm -rf $(DPDK_SOURCE) ; \
 	fi
-	@git clone $(DPDK_GIT_REPO) --branch $(DPDK_VERSION) $(DPDK_SOURCE)
+	@git clone $(DPDK_GIT_REPO) --branch $(DPDK_VERSION) --depth 1 $(DPDK_SOURCE)
 	@touch $@
 
 .PHONY: download
@@ -247,7 +251,7 @@ $(B)/.config.ok: $(B)/.patch.ok $(B)/custom-config
 config: $(B)/.config.ok
 
 $(B)/.build.ok: $(DPDK_SOURCE_FILES) $(B)/.config.ok
-	@make $(DPDK_MAKE_ARGS) install
+	@make $(DPDK_MAKE_ARGS) install -j
 	@cp $(I)/.config $(B)/.config
 	@touch $@
 

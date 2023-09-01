@@ -1,0 +1,95 @@
+From b8d96c46dd4ba4c542d2df78db81ee607328c0a7 Mon Sep 17 00:00:00 2001
+From: Chas Williams <chas3@att.com>
+Date: Sun, 12 Apr 2020 12:07:27 +0800
+Subject: [PATCH] ip_frag: fix IPv6 when MTU sizes not aligned to 8
+
+bytes The same issue was fixed on for the ipv4 version of this routine
+in commit 8d4d3a4f7337 ("ip_frag: handle MTU sizes not aligned to 8 bytes").
+Briefly, the size of an ipv6 header is always 40 bytes.  With an MTU of
+1500, this will never produce a multiple of 8 bytes for the frag_size
+and this routine can never succeed. Since RTE_ASSERTS are disabled by
+default, this failure is typically ignored.
+
+To fix this, round down to the nearest 8 bytes and use this when
+producing the fragments.
+
+Fixes: 0aa31d7a5929 ("ip_frag: add IPv6 fragmentation support")
+Cc: stable@dpdk.org
+
+Signed-off-by: Chas Williams <chas3@att.com>
+Acked-by: Luca Boccassi <bluca@debian.org>
+Acked-by: Konstantin Ananyev <konstantin.ananyev@intel.com>
+---
+ lib/librte_ip_frag/rte_ip_frag.h            |  1 +
+ lib/librte_ip_frag/rte_ipv6_fragmentation.c | 18 +++++++++++-------
+ 2 files changed, 12 insertions(+), 7 deletions(-)
+
+diff --git a/lib/librte_ip_frag/rte_ip_frag.h b/lib/librte_ip_frag/rte_ip_frag.h
+index a4ccaf9d1..04fd9df52 100644
+--- a/lib/librte_ip_frag/rte_ip_frag.h
++++ b/lib/librte_ip_frag/rte_ip_frag.h
+@@ -115,6 +115,7 @@ struct rte_ip_frag_tbl {
+ #define	RTE_IPV6_EHDR_MF_MASK			1
+ #define	RTE_IPV6_EHDR_FO_SHIFT			3
+ #define	RTE_IPV6_EHDR_FO_MASK			(~((1 << RTE_IPV6_EHDR_FO_SHIFT) - 1))
++#define	RTE_IPV6_EHDR_FO_ALIGN			(1 << RTE_IPV6_EHDR_FO_SHIFT)
+ 
+ #define RTE_IPV6_FRAG_USED_MASK			\
+ 	(RTE_IPV6_EHDR_MF_MASK | RTE_IPV6_EHDR_FO_MASK)
+diff --git a/lib/librte_ip_frag/rte_ipv6_fragmentation.c b/lib/librte_ip_frag/rte_ipv6_fragmentation.c
+index 62a7e4e83..b9437eb11 100644
+--- a/lib/librte_ip_frag/rte_ipv6_fragmentation.c
++++ b/lib/librte_ip_frag/rte_ipv6_fragmentation.c
+@@ -77,11 +77,14 @@ rte_ipv6_fragment_packet(struct rte_mbuf *pkt_in,
+ 	uint32_t out_pkt_pos, in_seg_data_pos;
+ 	uint32_t more_in_segs;
+ 	uint16_t fragment_offset, frag_size;
++	uint64_t frag_bytes_remaining;
+ 
+-	frag_size = (uint16_t)(mtu_size - sizeof(struct ipv6_hdr));
+-
+-	/* Fragment size should be a multiple of 8. */
+-	RTE_ASSERT((frag_size & ~RTE_IPV6_EHDR_FO_MASK) == 0);
++	/*
++	 * Ensure the IP payload length of all fragments (except the
++	 * the last fragment) are a multiple of 8 bytes per RFC2460.
++	 */
++	frag_size = RTE_ALIGN_FLOOR(mtu_size - sizeof(struct ipv6_hdr),
++				    RTE_IPV6_EHDR_FO_ALIGN);
+ 
+ 	/* Check that pkts_out is big enough to hold all fragments */
+ 	if (unlikely (frag_size * nb_pkts_out <
+@@ -111,6 +114,7 @@ rte_ipv6_fragment_packet(struct rte_mbuf *pkt_in,
+ 		/* Reserve space for the IP header that will be built later */
+ 		out_pkt->data_len = sizeof(struct ipv6_hdr) + sizeof(struct ipv6_extension_fragment);
+ 		out_pkt->pkt_len  = sizeof(struct ipv6_hdr) + sizeof(struct ipv6_extension_fragment);
++		frag_bytes_remaining = frag_size;
+ 
+ 		out_seg_prev = out_pkt;
+ 		more_out_segs = 1;
+@@ -130,7 +134,7 @@ rte_ipv6_fragment_packet(struct rte_mbuf *pkt_in,
+ 
+ 			/* Prepare indirect buffer */
+ 			rte_pktmbuf_attach(out_seg, in_seg);
+-			len = mtu_size - out_pkt->pkt_len;
++			len = frag_bytes_remaining;
+ 			if (len > (in_seg->data_len - in_seg_data_pos)) {
+ 				len = in_seg->data_len - in_seg_data_pos;
+ 			}
+@@ -140,11 +144,11 @@ rte_ipv6_fragment_packet(struct rte_mbuf *pkt_in,
+ 			    out_pkt->pkt_len);
+ 			out_pkt->nb_segs += 1;
+ 			in_seg_data_pos += len;
++			frag_bytes_remaining -= len;
+ 
+ 			/* Current output packet (i.e. fragment) done ? */
+-			if (unlikely(out_pkt->pkt_len >= mtu_size)) {
++			if (unlikely(frag_bytes_remaining == 0))
+ 				more_out_segs = 0;
+-			}
+ 
+ 			/* Current input segment done ? */
+ 			if (unlikely(in_seg_data_pos == in_seg->data_len)) {
+-- 
+2.19.1.6.gb485710b
+

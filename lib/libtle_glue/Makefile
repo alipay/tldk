@@ -23,6 +23,11 @@ include $(RTE_SDK)/mk/rte.vars.mk
 # library name
 LIB = libtle_glue.a
 
+# Experimental APIs (such as externel memory) are used. DPDK marked
+# these APIs with deprecated attribute. Wno-deprecated-declarations
+# is used to avoid GCC reporting error when these APIs are used.
+WERROR_FLAGS += -Wno-deprecated-declarations
+
 CFLAGS += -O3
 CFLAGS += $(WERROR_FLAGS) -I$(SRCDIR)
 
@@ -48,6 +53,8 @@ SRCS-y += util.c
 SRCS-y += tcp.c
 SRCS-y += udp.c
 SRCS-y += select.c
+SRCS-y += gvisor_glue_sockops.c
+SRCS-y += gvisor_glue_stackops.c
 
 ifeq ($(PACKETDRILL),y)
 SRCS-y += packetdrill.c
@@ -55,6 +62,7 @@ endif
 
 # install this header file
 SYMLINK-y-include += tle_glue.h
+SYMLINK-y-include += gvisor_glue.h
 
 # this lib dependencies
 DEPDIRS-y += lib/libtle_l4p

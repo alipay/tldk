@@ -39,6 +39,8 @@ extern int stopped;
 extern uint64_t rx_offload;
 extern uint64_t tx_offload;
 
+extern int external_socket_id;
+
 void port_reconfig(void);
 
 uint16_t create_loopback(uint32_t socket_id);

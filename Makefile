@@ -24,7 +24,6 @@ RTE_TARGET ?= x86_64-native-linuxapp-gcc
 
 DIRS-y += dpdk
 DIRS-y += lib
-DIRS-y += examples
 DIRS-y += test
 
 MAKEFLAGS += --no-print-directory
@@ -56,7 +55,7 @@ $(DIRS-y): $(RTE_SDK)/mk/rte.vars.mk
 		CUR_SUBDIR=$(CUR_SUBDIR)/$(@) \
 		S=$(CURDIR)/$(@) \
 		RTE_TARGET=$(RTE_TARGET) \
-		EXTRA_CFLAGS="-fPIC" \
+		EXTRA_CFLAGS="$(EXTRA_CFLAGS)" \
 		$(filter-out $(DIRS-y),$(MAKECMDGOALS))
 
 test: libtldk.a libtldk.so
@@ -68,8 +67,8 @@ libtldk.so: lib
 		-lpthread -ldl -lnuma
 
 define repack
-@echo -- repack $1 ---
-@rm -rf tmpxyz; rm -f $1; mkdir tmpxyz; cd tmpxyz;	\
+@echo -- repack $1 in $2 ---
+@rm -rf $2; rm -f $1; mkdir $2; cd $2;	\
 	for f in $(LIBS) ; do				\
 		fn=$$(basename $$f) ;			\
 		echo $$fn ;				\
@@ -78,14 +77,19 @@ define repack
 		ar x $$f ;				\
 		cd .. ;					\
 	done;						\
-ar cru ../$1 $$(find */*.o | paste -sd " " -); cd ..; rm -rf tmpxyz
+ar cru ../$1 $$(find */*.o | paste -sd " " -); cd ..; rm -rf $2
 endef
 
+ifeq ($(SHARED_HUGE),y)
+override EXTRA_CFLAGS := $(EXTRA_CFLAGS) -DSHARED_HUGE
+endif
+
+RANDOM := $(shell bash -c 'echo $$RANDOM')
 libtldk.a: lib
 	$(eval LIBS = $(wildcard $(DPDK_LIBS_PATH)/librte*.a))
-	$(call repack,libdpdk.a)
+	$(call repack,libdpdk.a,tmpdir_$(RANDOM))
 	$(eval LIBS = $(wildcard $(DPDK_LIBS_PATH)/librte*.a $(TLDK_LIBS_PATH)/*.a))
-	$(call repack,libtldk.a)
+	$(call repack,libtldk.a,tmpdir_$(RANDOM))
 
 $(RTE_SDK)/mk/rte.vars.mk:
 ifeq ($(RTE_SDK),$(LOCAL_RTE_SDK))

@@ -1,0 +1,44 @@
+From 8c4cf399015681eb26487021854fd2c3f7da61b7 Mon Sep 17 00:00:00 2001
+From: Jerin Jacob <jerinj@marvell.com>
+Date: Tue, 30 Jul 2019 16:34:06 +0530
+Subject: [PATCH] net/virtio: fix build
+
+Add extern to variable declaration to avoid some compiler treating it
+as variable definition.
+
+build error log:
+
+lib/librte_pmd_virtio.a(vhost_kernel.o):(.rodata+0x110):
+multiple definition of `vhost_msg_strings'
+lib/librte_pmd_virtio.a(vhost_user.o):(.data.rel.ro.local+0x0):
+first defined here
+lib/librte_pmd_virtio.a(virtio_user_dev.o):(.rodata+0xe8):
+multiple definition of `vhost_msg_strings'
+lib/librte_pmd_virtio.a(vhost_user.o):(.data.rel.ro.local+0x0):
+first defined here
+
+Fixes: 33d24d65fe2b ("net/virtio-user: abstract backend operations")
+Cc: stable@dpdk.org
+
+Signed-off-by: Jerin Jacob <jerinj@marvell.com>
+Reviewed-by: Maxime Coquelin <maxime.coquelin@redhat.com>
+---
+ drivers/net/virtio/virtio_user/vhost.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/virtio/virtio_user/vhost.h b/drivers/net/virtio/virtio_user/vhost.h
+index 83a85cc6f..fec85e2d6 100644
+--- a/drivers/net/virtio/virtio_user/vhost.h
++++ b/drivers/net/virtio/virtio_user/vhost.h
+@@ -67,7 +67,7 @@ enum vhost_user_request {
+ 	VHOST_USER_MAX
+ };
+ 
+-const char * const vhost_msg_strings[VHOST_USER_MAX];
++extern const char * const vhost_msg_strings[VHOST_USER_MAX];
+ 
+ struct vhost_memory_region {
+ 	uint64_t guest_phys_addr;
+-- 
+2.19.1.6.gb485710b
+
