@@ -370,6 +370,8 @@ open_bind_listen(struct sock *so, const struct sockaddr *local)
 
 uint32_t get_socket_id(void);
 
+void kill_tcp_streams(void);
+
 #ifdef __cplusplus
 }
 #endif

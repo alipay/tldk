@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "util.h"
+#include "internal.h"
 
 #define NUMA_NODE_PATH "/sys/devices/system/node"
 
@@ -57,4 +58,23 @@ get_socket_id(void)
 			break;
 
 	return eal_cpu_socket_id(i);
+}
+
+void kill_tcp_streams(void) {
+	struct sock *so;
+	struct glue_ctx *ctx;
+	int i, max = fd_table.fd_base + fd_table.fd_num;
+
+	for (i = fd_table.fd_base; i < max; i++) {
+		so = fd2sock(i);
+		if (!so || !so->valid)
+			continue;
+		if (IS_TCP(so))
+			tle_tcp_stream_kill(so->s);
+	}
+
+	for (i = 0; i < nb_ctx; ++i) {
+		ctx = glue_ctx_lookup(0, i);
+		while (be_process(ctx)) { /* empty */ };
+	}
 }
