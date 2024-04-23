@@ -20,6 +20,7 @@
 #include <linux/if_packet.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
+#include <linux/version.h>
 
 #include "gvisor_glue.h"
 #include "tle_glue.h"
@@ -93,8 +94,10 @@ static const char*
 get_ns_name(int ns_type)
 {
 	switch (ns_type) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,6,0)
 	case CLONE_NEWCGROUP:
 		return "cgroup";
+#endif
 	case CLONE_NEWIPC:
 		return "ipc";
 	case CLONE_NEWNS:
