@@ -42,16 +42,41 @@ static int
 ipv4_dst_lookup_tcp(void *data, const struct in_addr *addr,
 		    struct tle_dest *res)
 {
-	addr = ipv4_gateway_lookup(data, addr);
-	return arp_ipv4_dst_lookup(data, addr, res, IPPROTO_TCP);
+	int ret;
+	struct in_addr gw;
+
+	ret = ipv4_gateway_lookup(data, addr, &gw);
+	if (ret != 0)
+		return ret;
+	return arp_ipv4_dst_lookup(data, &gw, res, IPPROTO_TCP);
+
 }
 
 static int
 ipv4_dst_lookup_udp(void *data, const struct in_addr *addr,
 		    struct tle_dest *res)
 {
-	addr = ipv4_gateway_lookup(data, addr);
-	return arp_ipv4_dst_lookup(data, addr, res, IPPROTO_UDP);
+	int ret;
+	struct in_addr gw;
+
+	ret = ipv4_gateway_lookup(data, addr, &gw);
+	if (ret != 0)
+		return ret;
+	return arp_ipv4_dst_lookup(data, &gw, res, IPPROTO_UDP);
+
+}
+
+static int
+ipv4_dst_lookup_raw(void *data, const struct in_addr *addr,
+		    struct tle_dest *res)
+{
+	int ret;
+	struct in_addr gw;
+
+	ret = ipv4_gateway_lookup(data, addr, &gw);
+	if (ret != 0)
+		return ret;
+	return arp_ipv4_dst_lookup(data, &gw, res, IPPROTO_RAW);
 }
 
 static int
@@ -429,6 +454,8 @@ glue_ctx_init(struct glue_ctx *ctx, uint32_t socket_id)
 	ctx->ipv4_ml = get_ip_mask();
 	ctx->ipv4_gw.s_addr = get_ip_gate();
 	ctx->lo4_enabled = lo4_enabled();
+	route_table_init(&ctx->ipv4_rt, socket_id, ctx->ipv4,
+			 ctx->ipv4_ml, ctx->ipv4_gw.s_addr);
 	rte_memcpy(&ctx->ipv6, get_ipv6(), sizeof(struct in6_addr));
 	ctx->ipv6_ml = get_ipv6_mask();
 	rte_memcpy(&ctx->ipv6_gw, get_ipv6_gate(), sizeof(struct in6_addr));

@@ -156,7 +156,10 @@ stream_get_dest(uint8_t type, struct tle_stream *s, const void *src_addr,
 	} else
 		rc = -ENOENT;
 
-	if (rc < 0 || dst->dev == NULL || dst->dev->ctx != ctx)
+	if (rc < 0)
+		return -ENETUNREACH;
+
+	if (dst->dev == NULL || dst->dev->ctx != ctx)
 		return -ENOENT;
 
 	dev = dst->dev;
