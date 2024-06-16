@@ -193,21 +193,6 @@ glue_init(void)
 static void __attribute__((destructor))
 glue_uninit(void)
 {
-	struct sock *so;
-	struct glue_ctx *ctx;
-	int i, max = fd_table.fd_base + fd_table.fd_num;
-
 	/* TODO: lets optimize it */
-	for (i = fd_table.fd_base; i < max; i++) {
-		so = fd2sock(i);
-		if (!so || !so->valid)
-			continue;
-		if (IS_TCP(so))
-			tle_tcp_stream_kill(so->s);
-	}
-
-	for (i = 0; i < nb_ctx; ++i) {
-		ctx = glue_ctx_lookup(0, i);
-		while (be_process(ctx)) { /* empty */ };
-	}
+	kill_tcp_streams();
 }

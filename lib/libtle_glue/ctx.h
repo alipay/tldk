@@ -30,6 +30,7 @@
 
 #include <sys/queue.h>
 
+#include "route.h"
 #include "config.h"
 
 #ifdef __cplusplus
@@ -86,6 +87,7 @@ struct glue_ctx {
 		uint32_t ipv4;
 		struct in_addr ipv4_gw;
 		bool lo4_enabled;
+		struct route_table ipv4_rt;
 
 		uint32_t arp4_num;
 		struct arp_entry *arp4;

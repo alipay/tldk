@@ -21,10 +21,22 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <netinet/in.h>
 
-// stack initialization operations
+// stack life-cycle operations
 int plugin_preinitstack(int pid, char **init_str_ptr, int **fds, int *num);
 int plugin_initstack(const char *net_config, int *fds, int num);
+void plugin_destroystack(void);
+
+// stack information operations
+int plugin_get_interfaces(char **interfaces);
+int plugin_get_interfaceaddrs(char **interface_addrs);
+int plugin_get_routes(char **routes);
+int plugin_add_route(in_addr_t dst, uint8_t dst_len, in_addr_t gw);
+int plugin_del_route(in_addr_t dst, uint8_t dst_len, in_addr_t gw);
+int plugin_get_tcp_sndbuf_size(char **sndbuf_size);
+int plugin_get_tcp_rcvbuf_size(char **rcvbuf_size);
+int plugin_get_port_range(char **port_range);
 
 // socket event-related operations
 int plugin_epoll_create(void);

@@ -16,6 +16,8 @@
 #ifndef _TLE_GATEWAY_H_
 #define _TLE_GATEWAY_H_
 
+#include "route.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -43,23 +45,27 @@ is_ipv6_loopback_addr(const struct in6_addr *addr, struct glue_ctx *ctx)
 		return false;
 }
 
-static inline const struct in_addr *
-ipv4_gateway_lookup(void *data, const struct in_addr *addr)
+static inline int
+ipv4_gateway_lookup(void *data, const struct in_addr *addr,
+		    struct in_addr *gw_addr)
 {
-	uint8_t ls;
+	in_addr_t gw;
 	struct glue_ctx *ctx = data;
 
-	if (is_ipv4_loopback_addr(addr->s_addr, ctx))
-		return addr;
+	if (is_ipv4_loopback_addr(addr->s_addr, ctx)) {
+		gw_addr->s_addr = addr->s_addr;
+		return 0;
+	}
 
-	ls = 32 - ctx->ipv4_ml;
-	if ((addr->s_addr << ls) == (ctx->ipv4 << ls))
-		return addr;
+	gw = route_lookup(&ctx->ipv4_rt, addr->s_addr);
+	if (gw == ROUTE_NO_GATEWAY)
+		return -1;
+	else if (gw == 0)
+		gw_addr->s_addr = addr->s_addr;
+	else
+		gw_addr->s_addr = gw;
 
-	if (ctx->ipv4_gw.s_addr != 0)
-		return &ctx->ipv4_gw;
-
-	return addr;
+	return 0;
 }
 
 static inline const struct in6_addr *
