@@ -1,0 +1,44 @@
+From f6080ba5e5b2e4c16b0e37535d832f58a5caddc9 Mon Sep 17 00:00:00 2001
+From: "Wei Hu (Xavier)" <xavier.huwei@huawei.com>
+Date: Tue, 21 Apr 2020 11:29:57 +0800
+Subject: [PATCH] vfio: fix use after free with multiprocess
+
+This patch fixes the heap-use-after-free bug which was found by ASAN
+(Address-Sanitizer) in the vfio_get_default_container_fd function.
+
+Fixes: 6bcb7c95fe14 ("vfio: share default container in multi-process")
+Cc: stable@dpdk.org
+
+Signed-off-by: Chengwen Feng <fengchengwen@huawei.com>
+Signed-off-by: Wei Hu (Xavier) <xavier.huwei@huawei.com>
+Acked-by: Anatoly Burakov <anatoly.burakov@intel.com>
+---
+ lib/librte_eal/linuxapp/eal/eal_vfio.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/lib/librte_eal/linuxapp/eal/eal_vfio.c b/lib/librte_eal/linuxapp/eal/eal_vfio.c
+index e78fe6f525..e8075cfafe 100644
+--- a/lib/librte_eal/linuxapp/eal/eal_vfio.c
++++ b/lib/librte_eal/linuxapp/eal/eal_vfio.c
+@@ -947,6 +947,7 @@ vfio_get_default_container_fd(void)
+ 	struct rte_mp_reply mp_reply;
+ 	struct timespec ts = {.tv_sec = 5, .tv_nsec = 0};
+ 	struct vfio_mp_param *p = (struct vfio_mp_param *)mp_req.param;
++	int container_fd;
+ 
+ 	if (default_vfio_cfg->vfio_enabled)
+ 		return default_vfio_cfg->vfio_container_fd;
+@@ -969,8 +970,9 @@ vfio_get_default_container_fd(void)
+ 		mp_rep = &mp_reply.msgs[0];
+ 		p = (struct vfio_mp_param *)mp_rep->param;
+ 		if (p->result == SOCKET_OK && mp_rep->num_fds == 1) {
++			container_fd = mp_rep->fds[0];
+ 			free(mp_reply.msgs);
+-			return mp_rep->fds[0];
++			return container_fd;
+ 		}
+ 		free(mp_reply.msgs);
+ 	}
+-- 
+2.46.0.792.g87dc391469-goog
+
