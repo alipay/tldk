@@ -26,18 +26,18 @@
 
 int plugin_epoll_create(void)
 {
-    return tle_epoll_create(1);
+    return PRE(epoll_create)(1);
 }
 
 int plugin_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 {
-    return tle_epoll_ctl(epfd, op, fd, event);
+    return PRE(epoll_ctl)(epfd, op, fd, event);
 }
 
 int plugin_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)
 {
     int ret;
-    ret = tle_epoll_wait(epfd, events, maxevents, timeout);
+    ret = PRE(epoll_wait)(epfd, events, maxevents, timeout);
     return ret;
 }
 
@@ -48,7 +48,7 @@ int plugin_epoll_wait(int epfd, struct epoll_event *events, int maxevents, int t
 int plugin_socket(int domain, int type, int protocol, uint64_t *err)
 {
 	int ret;
-    ret = tle_socket(domain, type, protocol);
+    ret = PRE(socket)(domain, type, protocol);
     *err = errno;
     return ret;
 }
@@ -56,7 +56,7 @@ int plugin_socket(int domain, int type, int protocol, uint64_t *err)
 int plugin_listen(int sockfd, int backlog, uint64_t *err)
 {
     int ret;
-    ret = tle_listen(sockfd, backlog);
+    ret = PRE(listen)(sockfd, backlog);
     *err = errno;
     return ret;
 }
@@ -64,7 +64,7 @@ int plugin_listen(int sockfd, int backlog, uint64_t *err)
 int plugin_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_bind(sockfd, addr, addrlen);
+    ret = PRE(bind)(sockfd, addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -72,7 +72,7 @@ int plugin_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen, uint
 int plugin_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_accept(sockfd, addr, addrlen);
+    ret = PRE(accept)(sockfd, addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -80,7 +80,7 @@ int plugin_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen, uint64_
 int plugin_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_connect(sockfd, addr, addrlen);
+    ret = PRE(connect)(sockfd, addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -89,7 +89,7 @@ int plugin_getsockopt(int sockfd, int level, int optname,
 			void *optval, socklen_t *optlen, uint64_t *err)
 {
     int ret;
-    ret = tle_getsockopt(sockfd, level, optname, optval, optlen);
+    ret = PRE(getsockopt)(sockfd, level, optname, optval, optlen);
     *err = errno;
     return ret;               
 }
@@ -98,7 +98,7 @@ int plugin_setsockopt(int sockfd, int level, int optname,
 			const void *optval, socklen_t optlen, uint64_t *err)
 {
     int ret;
-    ret = tle_setsockopt(sockfd, level, optname, optval, optlen);
+    ret = PRE(setsockopt)(sockfd, level, optname, optval, optlen);
     *err = errno;
     return ret;
 }
@@ -106,7 +106,7 @@ int plugin_setsockopt(int sockfd, int level, int optname,
 int plugin_getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_getsockname(sockfd, addr, addrlen);
+    ret = PRE(getsockname)(sockfd, addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -114,7 +114,7 @@ int plugin_getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen, ui
 int plugin_getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_getpeername(sockfd, addr, addrlen);
+    ret = PRE(getpeername)(sockfd, addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -122,7 +122,7 @@ int plugin_getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen, ui
 int plugin_ioctl(int fd, uint64_t *err, unsigned long int request, void *buf)
 {
     int ret;
-    ret = tle_ioctl(fd, request, buf);
+    ret = PRE(ioctl)(fd, request, buf);
     *err = errno;
     return ret;
 }
@@ -130,7 +130,7 @@ int plugin_ioctl(int fd, uint64_t *err, unsigned long int request, void *buf)
 int plugin_shutdown(int sockfd, int how, uint64_t *err)
 {
     int ret;
-    ret = tle_shutdown(sockfd, how);
+    ret = PRE(shutdown)(sockfd, how);
     *err = errno;
     return ret;
 }
@@ -138,7 +138,7 @@ int plugin_shutdown(int sockfd, int how, uint64_t *err)
 int plugin_close(int fd)
 {
     int ret;
-    ret = tle_close(fd);
+    ret = PRE(close)(fd);
     return ret;
 }
 
@@ -155,7 +155,7 @@ int plugin_readiness(int fd, int events) {
 ssize_t plugin_recv(int sockfd, void *buf, size_t len, int flags, uint64_t *err)
 {
     int ret;
-    ret = tle_recv(sockfd, buf, len, flags);
+    ret = PRE(recv)(sockfd, buf, len, flags);
     *err = errno;
     return ret;
 }
@@ -164,7 +164,7 @@ ssize_t plugin_recvfrom(int sockfd, void *buf, size_t len, int flags,
 			struct sockaddr *src_addr, socklen_t *addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_recvfrom(sockfd, buf, len, flags, src_addr, addrlen);
+    ret = PRE(recvfrom)(sockfd, buf, len, flags, src_addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -172,7 +172,7 @@ ssize_t plugin_recvfrom(int sockfd, void *buf, size_t len, int flags,
 ssize_t plugin_recvmsg(int sockfd, struct msghdr *msg, int flags, uint64_t *err)
 {
     int ret;
-    ret = tle_recvmsg(sockfd, msg, flags);
+    ret = PRE(recvmsg)(sockfd, msg, flags);
     *err = errno;
     return ret;
 }
@@ -180,7 +180,7 @@ ssize_t plugin_recvmsg(int sockfd, struct msghdr *msg, int flags, uint64_t *err)
 ssize_t plugin_read(int fd, void *buf, size_t count, uint64_t *err)
 {
     int ret;
-    ret = tle_read(fd, buf, count);
+    ret = PRE(read)(fd, buf, count);
     *err = errno;
     return ret;
 }
@@ -188,7 +188,7 @@ ssize_t plugin_read(int fd, void *buf, size_t count, uint64_t *err)
 ssize_t plugin_readv(int fd, const struct iovec *iov, int iovcnt, uint64_t *err)
 {
     int ret;
-    ret = tle_readv(fd, iov, iovcnt);
+    ret = PRE(readv)(fd, iov, iovcnt);
     *err = errno;
     return ret;
 }
@@ -200,7 +200,7 @@ ssize_t plugin_readv(int fd, const struct iovec *iov, int iovcnt, uint64_t *err)
 ssize_t plugin_send(int sockfd, const void *buf, size_t len, int flags, uint64_t *err)
 {
     int ret;
-    ret = tle_send(sockfd, buf, len, flags);
+    ret = PRE(send)(sockfd, buf, len, flags);
     *err = errno;
     return ret;
 }
@@ -209,7 +209,7 @@ ssize_t plugin_sendto(int sockfd, const void *buf, size_t len, int flags,
 		const struct sockaddr *dest_addr, socklen_t addrlen, uint64_t *err)
 {
     int ret;
-    ret = tle_sendto(sockfd, buf, len, flags, dest_addr, addrlen);
+    ret = PRE(sendto)(sockfd, buf, len, flags, dest_addr, addrlen);
     *err = errno;
     return ret;
 }
@@ -217,7 +217,7 @@ ssize_t plugin_sendto(int sockfd, const void *buf, size_t len, int flags,
 ssize_t plugin_sendmsg(int sockfd, const struct msghdr *msg, int flags, uint64_t *err)
 {
     int ret;
-    ret = tle_sendmsg(sockfd, msg, flags);
+    ret = PRE(sendmsg)(sockfd, msg, flags);
     *err = errno;
     return ret;
 }
@@ -225,7 +225,7 @@ ssize_t plugin_sendmsg(int sockfd, const struct msghdr *msg, int flags, uint64_t
 ssize_t plugin_write(int fd, const void *buf, size_t count, uint64_t *err)
 {
    int ret;
-    ret = tle_write(fd, buf, count);
+    ret = PRE(write)(fd, buf, count);
     *err = errno;
     return ret;
 }
@@ -233,7 +233,7 @@ ssize_t plugin_write(int fd, const void *buf, size_t count, uint64_t *err)
 ssize_t plugin_writev(int fd, const struct iovec *iov, int iovcnt, uint64_t *err)
 {
     int ret;
-    ret = tle_writev(fd, iov, iovcnt);
+    ret = PRE(writev)(fd, iov, iovcnt);
     *err = errno;
     return ret;
 }
